@@ -1,0 +1,7 @@
+*.o
+finance_tracker
+
+data/
+
+test_persistence
+test_persistence.cpp
