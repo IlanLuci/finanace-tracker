@@ -3,11 +3,45 @@
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace fs = std::filesystem;
 namespace
 {
     constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 2;
+    constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
+    constexpr time_t SECONDS_PER_DAY = 86400;
+    constexpr uint32_t MAX_DAILY_VALUES = 100000;
+    constexpr uint32_t MAX_TRANSACTIONS = 1000000;
+    constexpr uint16_t MAX_SYMBOL_LENGTH = 16;
+    constexpr uint16_t MAX_NOTES_LENGTH = 4096;
+
+    long long dayBucket(time_t ts)
+    {
+        return static_cast<long long>(ts) / static_cast<long long>(SECONDS_PER_DAY);
+    }
+
+    double normalizedCashAmount(double amount)
+    {
+        return std::abs(amount);
+    }
+
+    bool isValidPortfolioType(uint8_t type_byte)
+    {
+        return type_byte <= static_cast<uint8_t>(PortfolioType::TRADITIONAL_IRA);
+    }
+
+    bool isValidTransactionType(uint8_t type_byte)
+    {
+        return type_byte <= static_cast<uint8_t>(TransactionType::DIVIDEND);
+    }
+
+    bool readExact(std::ifstream& file, char* buffer, std::streamsize bytes)
+    {
+        file.read(buffer, bytes);
+        return file.good();
+    }
 }
 
 // ==================== Portfolio Implementation ====================
@@ -24,21 +58,41 @@ Portfolio::Portfolio(PortfolioType ptype, double initial_capital)
 
 void Portfolio::addDailyValue(time_t date, double value)
 {
-    daily_values.emplace_back(date, value, std::time(nullptr));
+    const time_t now = std::time(nullptr);
+    const long long target_day = dayBucket(date);
+
+    // Keep one value per market day; update existing entry if it already exists.
+    for (auto& daily_value : daily_values)
+    {
+        if (dayBucket(daily_value.date) == target_day)
+        {
+            daily_value.date = date;
+            daily_value.value = value;
+            daily_value.last_updated = now;
+            return;
+        }
+    }
+
+    daily_values.emplace_back(date, value, now);
 }
 
 bool Portfolio::updateDailyValue(time_t date, double value, time_t updated_at)
 {
+    const long long target_day = dayBucket(date);
+    bool updated = false;
+
     for (auto& daily_value : daily_values)
     {
-        if (daily_value.date == date)
+        if (dayBucket(daily_value.date) == target_day)
         {
+            daily_value.date = date;
             daily_value.value = value;
             daily_value.last_updated = updated_at;
-            return true;
+            updated = true;
         }
     }
-    return false;
+
+    return updated;
 }
 
 void Portfolio::addTransaction(time_t date, double amount, TransactionType type, const std::string& notes)
@@ -55,23 +109,45 @@ void Portfolio::addTransaction(time_t date, double amount, TransactionType type,
 double Portfolio::getCurrentPortfolioValue() const
 {
     if (daily_values.empty())
+    {
         return 0.0;
-    return daily_values.back().value;
+    }
+
+    const auto latest_it = std::max_element(
+        daily_values.begin(),
+        daily_values.end(),
+        [](const DailyPortfolioValue& a, const DailyPortfolioValue& b)
+        {
+            return a.date < b.date;
+        }
+    );
+
+    return latest_it->value;
 }
 
 double Portfolio::getCapitalMovement(time_t start_date, time_t end_date) const
 {
     double movement = 0.0;
+
     for (const auto& transaction : transactions)
     {
         if (transaction.date >= start_date && transaction.date <= end_date)
         {
-            if (transaction.type == TransactionType::DEPOSIT)
-                movement += transaction.amount;
-            else
-                movement -= transaction.amount;
+            switch (transaction.type)
+            {
+                case TransactionType::DEPOSIT:
+                case TransactionType::SELL_STOCK:
+                case TransactionType::DIVIDEND:
+                    movement += normalizedCashAmount(transaction.amount);
+                    break;
+                case TransactionType::WITHDRAWAL:
+                case TransactionType::BUY_STOCK:
+                    movement -= normalizedCashAmount(transaction.amount);
+                    break;
+            }
         }
     }
+
     return movement;
 }
 
@@ -115,7 +191,12 @@ bool Portfolio::saveToFile(const std::string& filepath) const
     file.write(reinterpret_cast<const char*>(&available_capital), sizeof(double));
 
     // Write daily values
-    uint32_t daily_count = daily_values.size();
+    if (daily_values.size() > std::numeric_limits<uint32_t>::max())
+    {
+        std::cerr << "Error: Too many daily values to serialize" << std::endl;
+        return false;
+    }
+    uint32_t daily_count = static_cast<uint32_t>(daily_values.size());
     file.write(reinterpret_cast<const char*>(&daily_count), sizeof(uint32_t));
     for (const auto& dv : daily_values)
     {
@@ -125,7 +206,12 @@ bool Portfolio::saveToFile(const std::string& filepath) const
     }
 
     // Write transactions
-    uint32_t tx_count = transactions.size();
+    if (transactions.size() > std::numeric_limits<uint32_t>::max())
+    {
+        std::cerr << "Error: Too many transactions to serialize" << std::endl;
+        return false;
+    }
+    uint32_t tx_count = static_cast<uint32_t>(transactions.size());
     file.write(reinterpret_cast<const char*>(&tx_count), sizeof(uint32_t));
     for (const auto& tx : transactions)
     {
@@ -135,7 +221,13 @@ bool Portfolio::saveToFile(const std::string& filepath) const
         file.write(reinterpret_cast<const char*>(&type_byte), sizeof(uint8_t));
         
         // Write stock symbol
-        uint16_t symbol_length = tx.stock_symbol.length();
+        if (tx.stock_symbol.length() > std::numeric_limits<uint16_t>::max() ||
+            tx.stock_symbol.length() > MAX_SYMBOL_LENGTH)
+        {
+            std::cerr << "Error: Stock symbol too long for serialization" << std::endl;
+            return false;
+        }
+        uint16_t symbol_length = static_cast<uint16_t>(tx.stock_symbol.length());
         file.write(reinterpret_cast<const char*>(&symbol_length), sizeof(uint16_t));
         if (symbol_length > 0)
         {
@@ -146,7 +238,13 @@ bool Portfolio::saveToFile(const std::string& filepath) const
         file.write(reinterpret_cast<const char*>(&tx.shares), sizeof(double));
         
         // Write notes
-        uint16_t notes_length = tx.notes.length();
+        if (tx.notes.length() > std::numeric_limits<uint16_t>::max() ||
+            tx.notes.length() > MAX_NOTES_LENGTH)
+        {
+            std::cerr << "Error: Notes too long for serialization" << std::endl;
+            return false;
+        }
+        uint16_t notes_length = static_cast<uint16_t>(tx.notes.length());
         file.write(reinterpret_cast<const char*>(&notes_length), sizeof(uint16_t));
         if (notes_length > 0)
         {
@@ -167,32 +265,80 @@ bool Portfolio::loadFromFile(const std::string& filepath)
         return false;
     }
 
-    // Read header
-    file.read(reinterpret_cast<char*>(&version), sizeof(uint32_t));
-    uint8_t type_byte;
-    file.read(reinterpret_cast<char*>(&type_byte), sizeof(uint8_t));
-    type = static_cast<PortfolioType>(type_byte);
+    // Read and validate header first into temporaries.
+    uint32_t loaded_version;
+    if (!readExact(file, reinterpret_cast<char*>(&loaded_version), sizeof(uint32_t)))
+    {
+        std::cerr << "Error: Corrupt or truncated file header (version)" << std::endl;
+        return false;
+    }
+    if (loaded_version < OLDEST_SUPPORTED_FILE_VERSION || loaded_version > CURRENT_PORTFOLIO_FILE_VERSION)
+    {
+        std::cerr << "Error: Unsupported portfolio file version " << loaded_version << std::endl;
+        return false;
+    }
+
+    uint8_t portfolio_type_byte;
+    if (!readExact(file, reinterpret_cast<char*>(&portfolio_type_byte), sizeof(uint8_t)))
+    {
+        std::cerr << "Error: Corrupt or truncated file header (portfolio type)" << std::endl;
+        return false;
+    }
+    if (!isValidPortfolioType(portfolio_type_byte))
+    {
+        std::cerr << "Error: Invalid portfolio type in file" << std::endl;
+        return false;
+    }
+
     char reserved[3];
-    file.read(reserved, 3); // Skip reserved bytes
+    if (!readExact(file, reserved, 3)) // Skip reserved bytes
+    {
+        std::cerr << "Error: Corrupt or truncated file header (reserved bytes)" << std::endl;
+        return false;
+    }
 
     // Read available capital
-    file.read(reinterpret_cast<char*>(&available_capital), sizeof(double));
+    double loaded_available_capital;
+    if (!readExact(file, reinterpret_cast<char*>(&loaded_available_capital), sizeof(double)))
+    {
+        std::cerr << "Error: Corrupt or truncated file (available capital)" << std::endl;
+        return false;
+    }
 
     // Read daily values
     uint32_t daily_count;
-    file.read(reinterpret_cast<char*>(&daily_count), sizeof(uint32_t));
-    daily_values.clear();
+    if (!readExact(file, reinterpret_cast<char*>(&daily_count), sizeof(uint32_t)))
+    {
+        std::cerr << "Error: Corrupt or truncated file (daily count)" << std::endl;
+        return false;
+    }
+    if (daily_count > MAX_DAILY_VALUES)
+    {
+        std::cerr << "Error: Daily count exceeds supported limit" << std::endl;
+        return false;
+    }
+
+    std::vector<DailyPortfolioValue> loaded_daily_values;
+    loaded_daily_values.reserve(daily_count);
     for (uint32_t i = 0; i < daily_count; ++i)
     {
         time_t date;
         double value;
         time_t last_updated;
-        file.read(reinterpret_cast<char*>(&date), sizeof(time_t));
-        file.read(reinterpret_cast<char*>(&value), sizeof(double));
-
-        if (version >= 2)
+        if (!readExact(file, reinterpret_cast<char*>(&date), sizeof(time_t)) ||
+            !readExact(file, reinterpret_cast<char*>(&value), sizeof(double)))
         {
-            file.read(reinterpret_cast<char*>(&last_updated), sizeof(time_t));
+            std::cerr << "Error: Corrupt or truncated file (daily value record)" << std::endl;
+            return false;
+        }
+
+        if (loaded_version >= 2)
+        {
+            if (!readExact(file, reinterpret_cast<char*>(&last_updated), sizeof(time_t)))
+            {
+                std::cerr << "Error: Corrupt or truncated file (daily value last_updated)" << std::endl;
+                return false;
+            }
         }
         else
         {
@@ -200,13 +346,24 @@ bool Portfolio::loadFromFile(const std::string& filepath)
             last_updated = date;
         }
 
-        daily_values.emplace_back(date, value, last_updated);
+        loaded_daily_values.emplace_back(date, value, last_updated);
     }
 
     // Read transactions
     uint32_t tx_count;
-    file.read(reinterpret_cast<char*>(&tx_count), sizeof(uint32_t));
-    transactions.clear();
+    if (!readExact(file, reinterpret_cast<char*>(&tx_count), sizeof(uint32_t)))
+    {
+        std::cerr << "Error: Corrupt or truncated file (transaction count)" << std::endl;
+        return false;
+    }
+    if (tx_count > MAX_TRANSACTIONS)
+    {
+        std::cerr << "Error: Transaction count exceeds supported limit" << std::endl;
+        return false;
+    }
+
+    std::vector<Transaction> loaded_transactions;
+    loaded_transactions.reserve(tx_count);
     for (uint32_t i = 0; i < tx_count; ++i)
     {
         time_t date;
@@ -216,37 +373,82 @@ bool Portfolio::loadFromFile(const std::string& filepath)
         double shares;
         uint16_t notes_length;
         
-        file.read(reinterpret_cast<char*>(&date), sizeof(time_t));
-        file.read(reinterpret_cast<char*>(&amount), sizeof(double));
-        file.read(reinterpret_cast<char*>(&type_byte), sizeof(uint8_t));
+        if (!readExact(file, reinterpret_cast<char*>(&date), sizeof(time_t)) ||
+            !readExact(file, reinterpret_cast<char*>(&amount), sizeof(double)) ||
+            !readExact(file, reinterpret_cast<char*>(&type_byte), sizeof(uint8_t)))
+        {
+            std::cerr << "Error: Corrupt or truncated file (transaction header)" << std::endl;
+            return false;
+        }
+        if (!isValidTransactionType(type_byte))
+        {
+            std::cerr << "Error: Invalid transaction type in file" << std::endl;
+            return false;
+        }
         
         // Read stock symbol
-        file.read(reinterpret_cast<char*>(&symbol_length), sizeof(uint16_t));
+        if (!readExact(file, reinterpret_cast<char*>(&symbol_length), sizeof(uint16_t)))
+        {
+            std::cerr << "Error: Corrupt or truncated file (symbol length)" << std::endl;
+            return false;
+        }
+        if (symbol_length > MAX_SYMBOL_LENGTH)
+        {
+            std::cerr << "Error: Symbol length exceeds supported limit" << std::endl;
+            return false;
+        }
         std::string symbol;
         if (symbol_length > 0)
         {
             symbol.resize(symbol_length);
-            file.read(&symbol[0], symbol_length);
+            if (!readExact(file, &symbol[0], symbol_length))
+            {
+                std::cerr << "Error: Corrupt or truncated file (symbol)" << std::endl;
+                return false;
+            }
         }
         
         // Read shares
-        file.read(reinterpret_cast<char*>(&shares), sizeof(double));
+        if (!readExact(file, reinterpret_cast<char*>(&shares), sizeof(double)))
+        {
+            std::cerr << "Error: Corrupt or truncated file (shares)" << std::endl;
+            return false;
+        }
         
         // Read notes
-        file.read(reinterpret_cast<char*>(&notes_length), sizeof(uint16_t));
+        if (!readExact(file, reinterpret_cast<char*>(&notes_length), sizeof(uint16_t)))
+        {
+            std::cerr << "Error: Corrupt or truncated file (notes length)" << std::endl;
+            return false;
+        }
+        if (notes_length > MAX_NOTES_LENGTH)
+        {
+            std::cerr << "Error: Notes length exceeds supported limit" << std::endl;
+            return false;
+        }
         std::string notes;
         if (notes_length > 0)
         {
             notes.resize(notes_length);
-            file.read(&notes[0], notes_length);
+            if (!readExact(file, &notes[0], notes_length))
+            {
+                std::cerr << "Error: Corrupt or truncated file (notes)" << std::endl;
+                return false;
+            }
         }
         
         TransactionType tx_type = static_cast<TransactionType>(type_byte);
-        transactions.emplace_back(date, amount, tx_type, symbol, shares, notes);
+        loaded_transactions.emplace_back(date, amount, tx_type, symbol, shares, notes);
     }
 
+    version = loaded_version;
+    type = static_cast<PortfolioType>(portfolio_type_byte);
+    available_capital = loaded_available_capital;
+    daily_values = std::move(loaded_daily_values);
+    transactions = std::move(loaded_transactions);
+
     file.close();
-    return file.good();
+    return true;
 }
 
 // ==================== PortfolioManager Implementation ====================
@@ -271,6 +473,7 @@ PortfolioManager::PortfolioManager(const std::string& data_dir)
 bool PortfolioManager::createPortfolio(const std::string& name, PortfolioType type, double initial_capital)
 {
     std::string portfolio_dir = getPortfolioPath(name);
+    std::string portfolio_file = getPortfolioFilePath(name);
     
     try
     {
@@ -278,6 +481,13 @@ bool PortfolioManager::createPortfolio(const std::string& name, PortfolioType ty
         if (!fs::exists(portfolio_dir))
         {
             fs::create_directories(portfolio_dir);
+        }
+
+        // Prevent accidental overwrite of an existing portfolio file.
+        if (fs::exists(portfolio_file))
+        {
+            std::cerr << "Error creating portfolio: portfolio already exists at " << portfolio_file << std::endl;
+            return false;
         }
         
         // Create and save portfolio file

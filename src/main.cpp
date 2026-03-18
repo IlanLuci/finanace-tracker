@@ -2,6 +2,7 @@
 #include "file_utils.hpp"
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
 
 void printPortfolioInfo(const Portfolio& portfolio)
 {
@@ -25,11 +26,21 @@ void printPortfolioInfo(const Portfolio& portfolio)
     
     if (!portfolio.getDailyValues().empty())
     {
+        const auto& daily_values = portfolio.getDailyValues();
+        const auto latest_it = std::max_element(
+            daily_values.begin(),
+            daily_values.end(),
+            [](const DailyPortfolioValue& a, const DailyPortfolioValue& b)
+            {
+                return a.date < b.date;
+            }
+        );
+
         std::cout << "Daily Values Recorded: " << portfolio.getDailyValues().size() << std::endl;
-        std::cout << "Latest Price: " << FileUtils::formatCurrency(portfolio.getDailyValues().back().value) << " on " 
-                  << FileUtils::timeToString(portfolio.getDailyValues().back().date) << std::endl;
+        std::cout << "Latest Price: " << FileUtils::formatCurrency(latest_it->value) << " on " 
+                  << FileUtils::timeToString(latest_it->date) << std::endl;
         std::cout << "Latest Record Updated: "
-                  << FileUtils::timeToString(portfolio.getDailyValues().back().last_updated) << std::endl;
+                  << FileUtils::timeToString(latest_it->last_updated) << std::endl;
     }
     
     if (!portfolio.getTransactions().empty())
