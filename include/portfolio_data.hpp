@@ -35,6 +35,14 @@ enum class TransactionType : uint8_t
     DIVIDEND = 4           // Dividend payment (increases cash)
 };
 
+// Stock-specific event types
+enum class StockEventType : uint8_t
+{
+    BUY = 0,
+    SELL = 1,
+    DIVIDEND = 2
+};
+
 struct Transaction
 {
     time_t date;              // Unix timestamp of transaction
@@ -54,6 +62,74 @@ struct Transaction
     Transaction(time_t d, double amt, TransactionType t, 
                 const std::string& symbol, double num_shares, const std::string& n = "")
         : date(d), amount(amt), type(t), stock_symbol(symbol), shares(num_shares), notes(n) {}
+};
+
+struct StockEvent
+{
+    time_t date;                  // Unix timestamp of event
+    StockEventType type;          // BUY/SELL/DIVIDEND
+    double shares;                // Shares transacted (or shares held for dividend records)
+    double price_per_share;       // Price per share for BUY/SELL
+    double cash_amount;           // Signed cash amount (-buy, +sell, +dividend)
+    std::string notes;            // Optional notes
+
+    StockEvent()
+        : date(0), type(StockEventType::BUY), shares(0.0), price_per_share(0.0), cash_amount(0.0) {}
+
+    StockEvent(time_t d, StockEventType t, double sh, double pps, double cash, const std::string& n = "")
+        : date(d), type(t), shares(sh), price_per_share(pps), cash_amount(cash), notes(n) {}
+};
+
+struct DailyStockPrice
+{
+    time_t date;         // Unix timestamp for market close date
+    double close_price;  // Stock close price at market close
+    time_t last_updated; // Unix timestamp when this record was last modified
+
+    DailyStockPrice() : date(0), close_price(0.0), last_updated(0) {}
+    DailyStockPrice(time_t d, double cp, time_t lu) : date(d), close_price(cp), last_updated(lu) {}
+};
+
+class StockData
+{
+private:
+    uint32_t version;
+    std::string company_name;
+    std::string ticker;
+    double shares_owned;
+    double average_purchase_price;
+    time_t last_updated;
+    std::vector<StockEvent> events;
+    std::vector<DailyStockPrice> price_history;
+
+public:
+    StockData();
+    StockData(const std::string& company, const std::string& ticker_symbol);
+
+    uint32_t getVersion() const { return version; }
+    const std::string& getCompanyName() const { return company_name; }
+    const std::string& getTicker() const { return ticker; }
+    double getSharesOwned() const { return shares_owned; }
+    double getAveragePurchasePrice() const { return average_purchase_price; }
+    time_t getLastUpdated() const { return last_updated; }
+    const std::vector<StockEvent>& getEvents() const { return events; }
+    const std::vector<DailyStockPrice>& getPriceHistory() const { return price_history; }
+
+    void setCompanyName(const std::string& company) { company_name = company; }
+    void setTicker(const std::string& ticker_symbol) { ticker = ticker_symbol; }
+
+    bool recordBuy(time_t date, double shares, double price_per_share, const std::string& notes = "");
+    bool recordSell(time_t date, double shares, double price_per_share, const std::string& notes = "");
+    bool recordDividend(time_t date, double cash_amount, double shares_at_record = 0.0, const std::string& notes = "");
+    bool addEvent(time_t date, StockEventType type, double shares, double price_per_share,
+                  double cash_amount, const std::string& notes = "");
+    bool rebuildFromEvents(const std::vector<StockEvent>& ordered_events);
+
+    void addDailyClosePrice(time_t date, double close_price);
+    bool updateDailyClosePrice(time_t date, double close_price, time_t updated_at = std::time(nullptr));
+
+    bool saveToFile(const std::string& filepath) const;
+    bool loadFromFile(const std::string& filepath);
 };
 
 // Main Portfolio class
@@ -110,6 +186,12 @@ public:
     bool loadPortfolio(const std::string& name, Portfolio& portfolio);
     bool savePortfolio(const std::string& name, const Portfolio& portfolio);
     bool deletePortfolio(const std::string& name);
+
+    // Stock data management per portfolio
+    bool saveStockData(const std::string& portfolio_name, const StockData& stock_data);
+    bool loadStockData(const std::string& portfolio_name, const std::string& ticker, StockData& stock_data);
+    bool deleteStock(const std::string& portfolio_name, const std::string& ticker);
+    std::vector<std::string> listStocks(const std::string& portfolio_name) const;
     
     // Discovery
     bool scanPortfolios();
@@ -118,6 +200,8 @@ public:
     // Utility
     std::string getPortfolioPath(const std::string& name) const;
     std::string getPortfolioFilePath(const std::string& name) const;
+    std::string getStocksDirectoryPath(const std::string& portfolio_name) const;
+    std::string getStockFilePath(const std::string& portfolio_name, const std::string& ticker) const;
 };
 
 #endif
