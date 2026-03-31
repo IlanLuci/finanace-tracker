@@ -218,6 +218,53 @@ make run          # Build and run
 make clean        # Remove build artifacts
 ```
 
+### Running The Web API Server
+```bash
+./finance_tracker --server --port 8080 --data-dir data
+```
+
+- `--server` starts HTTP API mode instead of running the sample CLI flow.
+- `--port` sets the listen port (default `8080`).
+- `--data-dir` points to the portfolio storage root (default `data`).
+
+## Web API Endpoints
+
+Base URL example: `http://localhost:8080`
+
+### Health
+- `GET /api/health`
+
+### Portfolio Views
+- `GET /api/portfolios`
+    - Returns all portfolios with type, available cash, reported value, estimated value, and counts.
+- `GET /api/portfolios/{name}`
+    - Returns one portfolio with daily value history and summary stats.
+
+### Stock Views
+- `GET /api/portfolios/{name}/stocks`
+    - Returns all stocks with shares owned, average purchase price, latest close, market value, and recent events.
+
+### Transaction Views
+- `GET /api/portfolios/{name}/transactions/recent?limit=5`
+    - Returns a recent subset of transactions sorted newest-first.
+- `GET /api/portfolios/{name}/transactions`
+    - Returns the full transaction history sorted newest-first.
+
+### Transaction Mutations (JSON body)
+- `POST /api/portfolios/{name}/transactions/buy`
+    - Body: `{ "ticker": "AAPL", "shares": 10, "price_per_share": 175.25, "date": 1711824000, "notes": "optional" }`
+- `POST /api/portfolios/{name}/transactions/sell`
+    - Body: `{ "ticker": "AAPL", "shares": 4, "price_per_share": 181.00, "date": 1711824000, "notes": "optional" }`
+- `POST /api/portfolios/{name}/transactions/dividend`
+    - Body: `{ "ticker": "AAPL", "amount": 12.50, "shares": 30, "date": 1711824000, "notes": "optional" }`
+    - `shares` is optional; if omitted, current shares for that ticker are used.
+- `POST /api/portfolios/{name}/transactions/deposit`
+    - Body: `{ "amount": 1000.00, "date": 1711824000, "notes": "optional" }`
+- `POST /api/portfolios/{name}/transactions/withdrawal`
+    - Body: `{ "amount": 500.00, "date": 1711824000, "notes": "optional" }`
+
+All writes update `available_capital` and persist via `PortfolioManager::savePortfolio`, preserving the existing portfolio-to-stock sync behavior.
+
 ### Output
 - Binary: `./finance_tracker`
 - Object files: `obj/`

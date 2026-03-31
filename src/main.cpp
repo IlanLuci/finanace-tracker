@@ -1,8 +1,11 @@
 #include "portfolio_data.hpp"
 #include "file_utils.hpp"
+#include "web_server.hpp"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cstdint>
+#include <string>
 
 void printPortfolioInfo(const Portfolio& portfolio)
 {
@@ -98,14 +101,54 @@ void printPortfolioInfo(const Portfolio& portfolio)
 
 int main(int argc, char *argv[])
 {
-    (void)argc;  // Mark as intentionally unused
-    (void)argv;  // Mark as intentionally unused
+    bool run_server = false;
+    uint16_t server_port = 8080;
+    std::string data_dir = "data";
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg = argv[i];
+        if (arg == "--server")
+        {
+            run_server = true;
+        }
+        else if (arg == "--port" && i + 1 < argc)
+        {
+            ++i;
+            try
+            {
+                const int parsed_port = std::stoi(argv[i]);
+                if (parsed_port < 1 || parsed_port > 65535)
+                {
+                    std::cerr << "Invalid --port value: must be in range 1-65535" << std::endl;
+                    return 1;
+                }
+                server_port = static_cast<uint16_t>(parsed_port);
+            }
+            catch (const std::exception&)
+            {
+                std::cerr << "Invalid --port value: must be an integer" << std::endl;
+                return 1;
+            }
+        }
+        else if (arg == "--data-dir" && i + 1 < argc)
+        {
+            ++i;
+            data_dir = argv[i];
+        }
+    }
+
+    if (run_server)
+    {
+        PortfolioApiServer server(data_dir, server_port);
+        return server.start() ? 0 : 1;
+    }
     
     std::cout << "=== Stock Portfolio Tracker ===" << std::endl;
     std::cout << "Version 1.0" << std::endl;
 
     // Initialize portfolio manager
-    PortfolioManager manager("data");
+    PortfolioManager manager(data_dir);
 
     // Create a few example portfolios
     std::cout << "\nCreating example portfolios..." << std::endl;
