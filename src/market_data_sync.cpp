@@ -149,44 +149,127 @@ namespace
                                std::string& response_body,
                                std::string& error)
     {
-        const std::string url =
-            "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&outputsize=full&symbol=" +
-            symbol + "&apikey=" + api_key;
-
-        const std::string command =
-            "curl -sS --fail --connect-timeout 15 --max-time 45 '" + shellEscapeSingleQuoted(url) + "'";
-
-        std::array<char, 4096> buffer = {};
-        FILE* pipe = popen(command.c_str(), "r");
-        if (pipe == nullptr)
+        auto performRequest = [&](const std::string& function_name, std::string& out_body) -> bool
         {
-            error = "Failed to execute curl for " + symbol;
+            const std::string url =
+                "https://www.alphavantage.co/query?function=" + function_name +
+                "&outputsize=compact&symbol=" + symbol + "&apikey=" + api_key;
+
+            const std::string command =
+                "curl -sS --fail --connect-timeout 15 --max-time 45 '" + shellEscapeSingleQuoted(url) + "'";
+
+            std::array<char, 4096> buffer = {};
+            FILE* pipe = popen(command.c_str(), "r");
+            if (pipe == nullptr)
+            {
+                error = "Failed to execute curl for " + symbol;
+                return false;
+            }
+
+            out_body.clear();
+            while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+            {
+                out_body += buffer.data();
+            }
+
+            const int status = pclose(pipe);
+            if (status != 0)
+            {
+                error = "HTTP request failed for " + symbol;
+                return false;
+            }
+
+            return true;
+        };
+
+        // Use the free endpoint directly to avoid spending extra requests
+        // on premium-only adjusted data calls.
+        if (!performRequest("TIME_SERIES_DAILY", response_body))
+        {
             return false;
         }
 
-        response_body.clear();
-        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        auto extractJsonStringValue = [](const std::string& json, const std::string& key) -> std::string
         {
-            response_body += buffer.data();
-        }
+            const std::string marker = "\"" + key + "\"";
+            const size_t key_pos = json.find(marker);
+            if (key_pos == std::string::npos)
+            {
+                return "";
+            }
 
-        const int status = pclose(pipe);
-        if (status != 0)
-        {
-            error = "HTTP request failed for " + symbol;
-            return false;
-        }
+            const size_t colon = json.find(':', key_pos + marker.size());
+            if (colon == std::string::npos)
+            {
+                return "";
+            }
+
+            const size_t quote_start = json.find('"', colon + 1);
+            if (quote_start == std::string::npos)
+            {
+                return "";
+            }
+
+            std::string out;
+            out.reserve(128);
+            bool escaping = false;
+            for (size_t i = quote_start + 1; i < json.size(); ++i)
+            {
+                const char ch = json[i];
+                if (escaping)
+                {
+                    out.push_back(ch);
+                    escaping = false;
+                    continue;
+                }
+
+                if (ch == '\\')
+                {
+                    escaping = true;
+                    continue;
+                }
+
+                if (ch == '"')
+                {
+                    break;
+                }
+
+                out.push_back(ch);
+            }
+
+            return out;
+        };
 
         if (response_body.find("\"Error Message\"") != std::string::npos)
         {
-            error = "Alpha Vantage reported an error for " + symbol;
+            std::string message = extractJsonStringValue(response_body, "Error Message");
+            if (message.empty())
+            {
+                message = "Alpha Vantage reported an error";
+            }
+            error = message + " for " + symbol;
             return false;
         }
 
-        if (response_body.find("\"Note\"") != std::string::npos &&
-            response_body.find("frequency") != std::string::npos)
+        if (response_body.find("\"Note\"") != std::string::npos)
         {
-            error = "Alpha Vantage request limit reached";
+            std::string message = extractJsonStringValue(response_body, "Note");
+            if (message.empty())
+            {
+                message = "Alpha Vantage request note returned";
+            }
+            error = message;
+            return false;
+        }
+
+        if (response_body.find("\"Information\"") != std::string::npos)
+        {
+            std::string message = extractJsonStringValue(response_body, "Information");
+            if (message.empty())
+            {
+                message = "Alpha Vantage returned informational response";
+            }
+            error = message;
             return false;
         }
 
@@ -201,7 +284,22 @@ namespace
         const size_t start = json.find(marker);
         if (start == std::string::npos)
         {
-            error = "Missing Time Series (Daily) in response";
+            if (json.find("\"Note\"") != std::string::npos)
+            {
+                error = "Alpha Vantage returned Note payload (likely rate limit/throttle)";
+            }
+            else if (json.find("\"Information\"") != std::string::npos)
+            {
+                error = "Alpha Vantage returned Information payload instead of time series";
+            }
+            else if (json.find("\"Error Message\"") != std::string::npos)
+            {
+                error = "Alpha Vantage returned Error Message payload";
+            }
+            else
+            {
+                error = "Missing Time Series (Daily) in response";
+            }
             return false;
         }
 

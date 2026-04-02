@@ -68,7 +68,7 @@ namespace
 
     bool isValidTransactionType(uint8_t type_byte)
     {
-        return type_byte <= static_cast<uint8_t>(TransactionType::DIVIDEND);
+        return type_byte <= static_cast<uint8_t>(TransactionType::INTEREST);
     }
 
     bool isValidStockEventType(uint8_t type_byte)
@@ -453,6 +453,7 @@ namespace
                 return StockEventType::DIVIDEND;
             case TransactionType::DEPOSIT:
             case TransactionType::WITHDRAWAL:
+            case TransactionType::INTEREST:
                 return StockEventType::BUY;
         }
 
@@ -564,6 +565,7 @@ double Portfolio::getCapitalMovement(time_t start_date, time_t end_date) const
                 case TransactionType::DEPOSIT:
                 case TransactionType::SELL_STOCK:
                 case TransactionType::DIVIDEND:
+                case TransactionType::INTEREST:
                     movement += normalizedCashAmount(transaction.amount);
                     break;
                 case TransactionType::WITHDRAWAL:

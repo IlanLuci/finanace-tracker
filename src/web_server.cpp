@@ -21,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -540,6 +541,7 @@ namespace
             case TransactionType::BUY_STOCK: return "BUY_STOCK";
             case TransactionType::SELL_STOCK: return "SELL_STOCK";
             case TransactionType::DIVIDEND: return "DIVIDEND";
+            case TransactionType::INTEREST: return "INTEREST";
         }
 
         return "UNKNOWN";
@@ -1590,6 +1592,24 @@ namespace
                     );
                 }
 
+                if (action == "interest")
+                {
+                    auto amount = getObjectNumber(body, "amount");
+                    if (!amount.has_value() || amount.value() < 0.0)
+                    {
+                        return makeJsonResponse(400, makeErrorBody("interest requires non-negative amount"));
+                    }
+
+                    return appendCashTransaction(
+                        manager,
+                        portfolio_name,
+                        TransactionType::INTEREST,
+                        amount.value(),
+                        date,
+                        notes
+                    );
+                }
+
                 return makeJsonResponse(404, makeErrorBody("Unknown transaction action"));
             }
         }
@@ -1641,11 +1661,23 @@ bool PortfolioApiServer::start()
     }
 
     PortfolioManager manager(data_directory);
-    const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
-    MarketDataSync::syncAllPortfolios(manager, sync_config);
 
     std::cout << "Portfolio API server listening on http://localhost:" << port << std::endl;
     std::cout << "Data directory: " << data_directory << std::endl;
+
+    // Run startup sync in the background so the API is responsive immediately.
+    const std::string startup_sync_data_dir = data_directory;
+    std::thread(
+        [startup_sync_data_dir]()
+        {
+            PortfolioManager sync_manager(startup_sync_data_dir);
+            const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+            if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
+            {
+                std::cerr << "Startup market-data sync completed with errors" << std::endl;
+            }
+        }
+    ).detach();
 
     while (true)
     {

@@ -32,7 +32,8 @@ enum class TransactionType : uint8_t
     WITHDRAWAL = 1,        // Remove cash from portfolio
     BUY_STOCK = 2,         // Purchase stock (reduces cash)
     SELL_STOCK = 3,        // Sell stock (increases cash)
-    DIVIDEND = 4           // Dividend payment (increases cash)
+    DIVIDEND = 4,          // Dividend payment (increases cash)
+    INTEREST = 5           // Interest payment (increases cash)
 };
 
 // Stock-specific event types

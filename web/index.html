@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portfolio Atlas</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-bg"></div>
+  <div class="shape shape-a"></div>
+  <div class="shape shape-b"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <p class="brand-kicker">Finance Tracker</p>
+      <h1>Portfolio Atlas</h1>
+    </div>
+
+    <button id="apiConfigToggle" class="ghost-btn" type="button" aria-expanded="false" aria-controls="apiConfigPanel">API Settings</button>
+  </header>
+
+  <main class="layout">
+    <aside id="apiConfigPanel" class="panel api-panel" hidden>
+      <h2>API Endpoint</h2>
+      <p>Use empty value for same-origin. Example: http://localhost:8080</p>
+      <form id="apiConfigForm">
+        <label for="apiBaseInput">Base URL</label>
+        <input id="apiBaseInput" name="apiBase" type="url" placeholder="http://localhost:8080" autocomplete="off" />
+        <div class="row-actions">
+          <button class="primary-btn" type="submit">Save</button>
+          <button id="apiResetBtn" class="ghost-btn" type="button">Reset</button>
+        </div>
+      </form>
+      <small id="apiStatus" aria-live="polite"></small>
+    </aside>
+
+    <section class="content">
+      <nav class="breadcrumbs" id="breadcrumbs"></nav>
+
+      <section id="flash" class="flash" hidden></section>
+
+      <section id="dashboardView" class="view"></section>
+
+      <section id="portfolioView" class="view" hidden>
+        <div class="page-head">
+          <div>
+            <p class="eyebrow" id="portfolioType"></p>
+            <h2 id="portfolioName">Portfolio</h2>
+          </div>
+          <button id="backToDashBtn" class="ghost-btn" type="button">Back to Dashboard</button>
+        </div>
+
+        <div class="metric-grid" id="portfolioMetrics"></div>
+
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <h3>Portfolio Value</h3>
+            <div class="chart-tools">
+              <select id="portfolioPeriodSelect" class="graph-period-select" aria-label="Portfolio chart period">
+                <option value="1M">1M</option>
+                <option value="3M">3M</option>
+                <option value="6M" selected>6M</option>
+                <option value="1Y">1Y</option>
+                <option value="3Y">3Y</option>
+                <option value="ALL">ALL</option>
+              </select>
+              <span id="portfolioChangeChip" class="chip chip-neutral">Change: n/a</span>
+            </div>
+          </div>
+          <canvas id="portfolioChart" aria-label="Portfolio Value Chart"></canvas>
+        </article>
+
+        <section class="split">
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Stocks</h3>
+              <span id="stockCount" class="chip"></span>
+            </div>
+            <div id="stocksList" class="stocks-grid"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Recent Transactions</h3>
+              <div class="chart-tools">
+                <button id="openTransactionDialogBtn" class="primary-btn" type="button">Record Transaction</button>
+                <button id="viewAllTransactionsBtn" class="ghost-btn" type="button">View Full History</button>
+              </div>
+            </div>
+            <div id="recentTransactions"></div>
+          </article>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="transactionsDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h3>Transaction History</h3>
+      <button class="ghost-btn" value="cancel">Close</button>
+    </form>
+    <div id="transactionsHistory"></div>
+  </dialog>
+
+  <dialog id="transactionDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h3>Record Transaction</h3>
+      <button class="ghost-btn" value="cancel" type="submit">Close</button>
+    </form>
+    <form id="transactionForm" class="tx-form">
+      <div class="field-row">
+        <label for="transactionType">Type</label>
+        <select id="transactionType" name="transactionType" class="graph-period-select">
+          <option value="buy">Buy Stock</option>
+          <option value="sell">Sell Stock</option>
+          <option value="dividend">Dividend</option>
+          <option value="interest">Interest Payment</option>
+        </select>
+      </div>
+
+      <div id="groupTicker" class="field-row">
+        <label for="transactionTicker">Ticker</label>
+        <input id="transactionTicker" name="ticker" type="text" placeholder="AAPL" autocomplete="off" />
+      </div>
+
+      <div id="groupShares" class="field-row">
+        <label for="transactionShares">Shares</label>
+        <input id="transactionShares" name="shares" type="number" min="0" step="0.0001" placeholder="10" />
+      </div>
+
+      <div id="groupPrice" class="field-row">
+        <label for="transactionPrice">Price Per Share</label>
+        <input id="transactionPrice" name="price" type="number" min="0" step="0.0001" placeholder="175.25" />
+      </div>
+
+      <div id="groupAmount" class="field-row" hidden>
+        <label for="transactionAmount">Amount</label>
+        <input id="transactionAmount" name="amount" type="number" min="0" step="0.01" placeholder="12.50" />
+      </div>
+
+      <div class="field-row">
+        <label for="transactionDate">Date (optional)</label>
+        <input id="transactionDate" name="date" type="datetime-local" />
+      </div>
+
+      <div class="field-row">
+        <label for="transactionNotes">Notes (optional)</label>
+        <input id="transactionNotes" name="notes" type="text" placeholder="Quarterly payout" />
+      </div>
+
+      <div class="row-actions">
+        <button id="transactionSubmitBtn" class="primary-btn" type="submit">Save Transaction</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="stockDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h3 id="stockDialogTitle">Stock</h3>
+      <button class="ghost-btn" value="cancel">Close</button>
+    </form>
+    <div id="stockDialogBody"></div>
+  </dialog>
+</body>
+</html>

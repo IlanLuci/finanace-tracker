@@ -2,11 +2,90 @@
 #include "file_utils.hpp"
 #include "market_data_sync.hpp"
 #include "web_server.hpp"
+#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
+
+namespace
+{
+std::string trim(const std::string& value)
+{
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])))
+    {
+        ++start;
+    }
+
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
+    {
+        --end;
+    }
+
+    return value.substr(start, end - start);
+}
+
+bool loadDotEnvFile(const std::string& path)
+{
+    std::ifstream in(path);
+    if (!in.is_open())
+    {
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(in, line))
+    {
+        const std::string raw = trim(line);
+        if (raw.empty() || raw[0] == '#')
+        {
+            continue;
+        }
+
+        const size_t eq = raw.find('=');
+        if (eq == std::string::npos || eq == 0)
+        {
+            continue;
+        }
+
+        std::string key = trim(raw.substr(0, eq));
+        std::string value = trim(raw.substr(eq + 1));
+
+        if (key.rfind("export ", 0) == 0)
+        {
+            key = trim(key.substr(7));
+        }
+
+        if (key.empty())
+        {
+            continue;
+        }
+
+        if (value.size() >= 2)
+        {
+            const char first = value.front();
+            const char last = value.back();
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+            {
+                value = value.substr(1, value.size() - 2);
+            }
+        }
+
+        // Keep shell-exported values if already present.
+        if (std::getenv(key.c_str()) == nullptr)
+        {
+            setenv(key.c_str(), value.c_str(), 0);
+        }
+    }
+
+    return true;
+}
+}
 
 void printPortfolioInfo(const Portfolio& portfolio)
 {
@@ -73,6 +152,9 @@ void printPortfolioInfo(const Portfolio& portfolio)
                 case TransactionType::DIVIDEND:
                     type_str = "DIVIDEND   ";
                     break;
+                case TransactionType::INTEREST:
+                    type_str = "INTEREST   ";
+                    break;
             }
             
             std::cout << FileUtils::timeToString(tx.date) << " | " << type_str << " | ";
@@ -102,6 +184,8 @@ void printPortfolioInfo(const Portfolio& portfolio)
 
 int main(int argc, char *argv[])
 {
+    loadDotEnvFile(".env");
+
     bool run_server = false;
     uint16_t server_port = 8080;
     std::string data_dir = "data";
