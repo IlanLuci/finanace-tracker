@@ -683,18 +683,31 @@ function updateTransactionFormVisibility() {
   const isBuySell = type === "buy" || type === "sell";
   const isDividend = type === "dividend";
   const isInterest = type === "interest";
+  const isTransfer = type === "deposit" || type === "withdrawal";
 
-  el.groupTicker.hidden = isInterest;
-  el.groupShares.hidden = !(isBuySell || isDividend);
-  el.groupPrice.hidden = !isBuySell;
-  el.groupAmount.hidden = !(isDividend || isInterest);
+  // Update visibility with both hidden attribute and display property for reliability
+  const updateFieldVisibility = (el, shouldHide) => {
+    if (el) {
+      el.hidden = shouldHide;
+      if (shouldHide) {
+        el.style.display = "none";
+      } else {
+        el.style.display = "";
+      }
+    }
+  };
 
-  el.transactionTicker.required = !isInterest;
+  updateFieldVisibility(el.groupTicker, isInterest || isTransfer);
+  updateFieldVisibility(el.groupShares, !(isBuySell || isDividend));
+  updateFieldVisibility(el.groupPrice, !isBuySell);
+  updateFieldVisibility(el.groupAmount, !(isDividend || isInterest || isTransfer));
+
+  el.transactionTicker.required = !isInterest && !isTransfer;
   el.transactionShares.required = isBuySell;
   el.transactionPrice.required = isBuySell;
-  el.transactionAmount.required = isDividend || isInterest;
+  el.transactionAmount.required = isDividend || isInterest || isTransfer;
 
-  if (isInterest) {
+  if (isInterest || isTransfer) {
     el.transactionTicker.value = "";
     el.transactionShares.value = "";
     el.transactionPrice.value = "";
@@ -746,6 +759,8 @@ async function submitTransactionForm(event) {
       payload.shares = shares;
     }
   } else if (action === "interest") {
+    payload.amount = safeNumber(el.transactionAmount.value);
+  } else if (action === "deposit" || action === "withdrawal") {
     payload.amount = safeNumber(el.transactionAmount.value);
   }
 

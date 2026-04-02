@@ -1,22 +1,26 @@
 :root {
-  --bg: #eef2f6;
-  --surface: rgba(255, 252, 245, 0.78);
-  --surface-strong: #ffffff;
-  --surface-muted: rgba(248, 246, 239, 0.8);
-  --ink: #17211f;
-  --muted: #5f6e69;
-  --line: #d9ddd8;
-  --accent: #1e8f75;
-  --accent-2: #ca4b2b;
-  --good: #18794e;
-  --bad: #af2f35;
-  --shadow: 0 20px 40px rgba(18, 30, 28, 0.12);
+  --bg: #0f1419;
+  --surface: rgba(26, 35, 50, 0.85);
+  --surface-strong: #1a2332;
+  --surface-muted: rgba(35, 48, 71, 0.6);
+  --ink: #e8ecf1;
+  --muted: #9ca3af;
+  --line: #2d3f5a;
+  --accent: #10b981;
+  --accent-2: #f59e0b;
+  --good: #34d399;
+  --bad: #ef4444;
+  --shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
   --radius-lg: 20px;
   --radius-md: 14px;
 }
 
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 body {
@@ -32,9 +36,9 @@ body {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(1300px 680px at 8% -10%, rgba(24, 75, 138, 0.11), transparent 64%),
-    radial-gradient(940px 520px at 100% 8%, rgba(20, 121, 111, 0.08), transparent 62%),
-    linear-gradient(160deg, #f4f7fb 0%, #edf2f8 45%, #e9eef4 100%);
+    radial-gradient(1300px 680px at 8% -10%, rgba(59, 130, 246, 0.08), transparent 64%),
+    radial-gradient(940px 520px at 100% 8%, rgba(34, 197, 94, 0.06), transparent 62%),
+    linear-gradient(160deg, #0f1419 0%, #1a2332 45%, #141b27 100%);
   z-index: -3;
 }
 
@@ -43,10 +47,10 @@ body {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(44, 72, 107, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(44, 72, 107, 0.032) 1px, transparent 1px);
+    linear-gradient(rgba(59, 130, 246, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59, 130, 246, 0.02) 1px, transparent 1px);
   background-size: 38px 38px;
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.38), rgba(0, 0, 0, 0));
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0));
   pointer-events: none;
 }
 
@@ -63,7 +67,7 @@ body {
   height: 320px;
   left: -110px;
   bottom: 16%;
-  background: linear-gradient(135deg, #87a7d7, #d7e3f8);
+  background: linear-gradient(135deg, #3b82f6, #1e40af);
 }
 
 .shape-b {
@@ -71,7 +75,7 @@ body {
   height: 280px;
   right: -80px;
   top: 20%;
-  background: linear-gradient(135deg, #78bfb8, #d6efeb);
+  background: linear-gradient(135deg, #10b981, #059669);
 }
 
 .topbar {
@@ -164,8 +168,9 @@ h3 {
 .flash {
   padding: 12px 14px;
   border-radius: var(--radius-md);
-  border: 1px solid #e9c88f;
-  background: #fff6e2;
+  border: 1px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
 }
 
 .page-head {
@@ -194,7 +199,7 @@ h3 {
 }
 
 .chart-panel {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0%, var(--surface-muted) 100%);
+  background: linear-gradient(180deg, rgba(26, 35, 50, 0.9) 0%, rgba(20, 27, 39, 0.8) 100%);
 }
 
 .chart-panel canvas {
@@ -223,12 +228,13 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .graph-period-select {
-  border: 1px solid #b8c4bf;
-  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #3f5f7f;
+  background: rgba(26, 35, 50, 0.8);
   color: var(--ink);
   border-radius: 999px;
   font: inherit;
@@ -241,23 +247,23 @@ h3 {
   font-size: 12px;
   border-radius: 999px;
   padding: 4px 10px;
-  background: #e4ecea;
-  color: #20463f;
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
 }
 
 .chip-positive {
-  background: #deefe8;
-  color: #16684f;
+  background: rgba(52, 211, 153, 0.2);
+  color: #6ee7b7;
 }
 
 .chip-negative {
-  background: #f5ded9;
-  color: #8f3023;
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
 }
 
 .chip-neutral {
-  background: #e7ecea;
-  color: #4b5e59;
+  background: rgba(107, 114, 128, 0.2);
+  color: #d1d5db;
 }
 
 .metric-grid {
@@ -271,7 +277,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 14px;
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(26, 35, 50, 0.7);
 }
 
 .metric .label {
@@ -299,23 +305,31 @@ h3 {
   padding: 9px 15px;
   cursor: pointer;
   transition: transform 150ms ease, background 150ms ease, color 150ms ease, border-color 150ms ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .primary-btn {
   border: none;
   color: #ffffff;
-  background: linear-gradient(135deg, var(--accent), #2276ac);
+  background: linear-gradient(135deg, var(--accent), #059669);
 }
 
 .ghost-btn {
-  border: 1px solid #bbc5c1;
-  background: #ffffffeb;
+  border: 1px solid #3f5f7f;
+  background: rgba(26, 35, 50, 0.6);
   color: var(--ink);
 }
 
 .primary-btn:hover,
 .ghost-btn:hover {
   transform: translateY(-1px);
+}
+
+#viewAllTransactionsBtn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
 }
 
 .split {
@@ -373,7 +387,7 @@ h3 {
   width: 100%;
   border-collapse: collapse;
   font-size: 14px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(26, 35, 50, 0.5);
   border-radius: 10px;
   overflow: hidden;
 }
@@ -394,11 +408,11 @@ h3 {
 }
 
 .tx-table tbody tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.55);
+  background: rgba(35, 48, 71, 0.3);
 }
 
 .tx-table tbody tr:hover {
-  background: rgba(191, 221, 214, 0.25);
+  background: rgba(59, 130, 246, 0.15);
 }
 
 .positive {
@@ -419,7 +433,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 17px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.66) 0%, rgba(255, 251, 242, 0.7) 100%);
+  background: linear-gradient(180deg, rgba(26, 35, 50, 0.8) 0%, rgba(20, 27, 39, 0.9) 100%);
   box-shadow: var(--shadow);
   cursor: pointer;
   display: grid;
@@ -433,7 +447,7 @@ h3 {
 
 .portfolio-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 15px 28px rgba(30, 51, 48, 0.16);
+  box-shadow: 0 15px 28px rgba(0, 0, 0, 0.4);
 }
 
 .empty-state {
@@ -487,6 +501,8 @@ input {
   font: inherit;
   padding: 10px;
   margin-top: 6px;
+  background: rgba(26, 35, 50, 0.8);
+  color: var(--ink);
 }
 
 label {
@@ -501,11 +517,11 @@ label {
   width: min(980px, 94vw);
   max-height: 85vh;
   padding: 18px;
-  background: #fffefb;
+  background: #1a2332;
 }
 
 .dialog::backdrop {
-  background: rgba(12, 16, 15, 0.45);
+  background: rgba(0, 0, 0, 0.6);
 }
 
 .dialog-head {
