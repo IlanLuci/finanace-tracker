@@ -1,5 +1,6 @@
 #include "portfolio_data.hpp"
 #include "file_utils.hpp"
+#include "market_data_sync.hpp"
 #include "web_server.hpp"
 #include <iostream>
 #include <iomanip>
@@ -149,6 +150,9 @@ int main(int argc, char *argv[])
 
     // Initialize portfolio manager
     PortfolioManager manager(data_dir);
+
+    const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+    MarketDataSync::syncAllPortfolios(manager, sync_config);
 
     // Create a few example portfolios
     std::cout << "\nCreating example portfolios..." << std::endl;

@@ -158,6 +158,8 @@ public:
     void setAvailableCapital(double capital) { available_capital = capital; }
     void addDailyValue(time_t date, double value);
     bool updateDailyValue(time_t date, double value, time_t updated_at = std::time(nullptr));
+    void setDailyValues(const std::vector<DailyPortfolioValue>& values);
+    void clearDailyValues();
     void addTransaction(time_t date, double amount, TransactionType type, const std::string& notes = "");
     void addTransaction(time_t date, double amount, TransactionType type, 
                        const std::string& symbol, double shares, const std::string& notes = "");

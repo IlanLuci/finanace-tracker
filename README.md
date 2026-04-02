@@ -227,6 +227,31 @@ make clean        # Remove build artifacts
 - `--port` sets the listen port (default `8080`).
 - `--data-dir` points to the portfolio storage root (default `data`).
 
+## Market Close Price Sync (Alpha Vantage)
+
+On startup, the application now:
+- Scans all portfolios and stock tickers found in transaction history.
+- Checks whether daily close prices are missing (empty history, stale latest day, or gaps around event days).
+- Fetches `TIME_SERIES_DAILY_ADJUSTED` from Alpha Vantage for tickers that need backfill.
+- Saves market-close prices into each stock file under `data/<portfolio>/stocks/<TICKER>.dat`.
+- Recomputes and persists historical daily portfolio totals from transactions + close prices.
+
+After any API transaction mutation (`buy`, `sell`, `dividend`, `deposit`, `withdrawal`), daily portfolio values are recomputed immediately. For stock mutations, an additional per-portfolio Alpha Vantage sync is triggered before recompute so retroactive trades can update historical totals.
+
+### Environment Variables
+
+```bash
+export ALPHAVANTAGE_API_KEY="your_api_key_here"
+export ALPHAVANTAGE_MAX_REQUESTS_PER_RUN=25
+export ALPHAVANTAGE_MIN_SECONDS_BETWEEN_REQUESTS=12
+```
+
+- `ALPHAVANTAGE_API_KEY`: required for automatic market data fetches.
+- `ALPHAVANTAGE_MAX_REQUESTS_PER_RUN`: hard cap per process start. This prevents exhausting daily quotas.
+- `ALPHAVANTAGE_MIN_SECONDS_BETWEEN_REQUESTS`: delay between calls to reduce per-minute limit hits.
+
+If no API key is set, the app still recomputes totals using already-saved prices and logs a warning for skipped fetches.
+
 ## Web API Endpoints
 
 Base URL example: `http://localhost:8080`

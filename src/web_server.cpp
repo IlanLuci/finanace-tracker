@@ -1,5 +1,6 @@
 #include "web_server.hpp"
 
+#include "market_data_sync.hpp"
 #include "portfolio_data.hpp"
 
 #include <algorithm>
@@ -1271,6 +1272,11 @@ namespace
             return makeJsonResponse(500, makeErrorBody("Failed to save portfolio"));
         }
 
+        if (!MarketDataSync::recomputePortfolioDailyValues(manager, portfolio_name))
+        {
+            return makeJsonResponse(500, makeErrorBody("Transaction saved but daily portfolio values failed to recompute"));
+        }
+
         std::ostringstream out;
         out << "{"
             << "\"status\":\"ok\"," 
@@ -1332,6 +1338,12 @@ namespace
         if (!manager.savePortfolio(portfolio_name, portfolio))
         {
             return makeJsonResponse(500, makeErrorBody("Failed to save portfolio"));
+        }
+
+        const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+        if (!MarketDataSync::syncPortfolio(manager, portfolio_name, sync_config))
+        {
+            return makeJsonResponse(500, makeErrorBody("Transaction saved but market-data sync/daily value recompute failed"));
         }
 
         std::ostringstream out;
@@ -1629,6 +1641,8 @@ bool PortfolioApiServer::start()
     }
 
     PortfolioManager manager(data_directory);
+    const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+    MarketDataSync::syncAllPortfolios(manager, sync_config);
 
     std::cout << "Portfolio API server listening on http://localhost:" << port << std::endl;
     std::cout << "Data directory: " << data_directory << std::endl;

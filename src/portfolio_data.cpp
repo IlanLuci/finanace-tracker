@@ -511,6 +511,16 @@ bool Portfolio::updateDailyValue(time_t date, double value, time_t updated_at)
     return updated;
 }
 
+void Portfolio::setDailyValues(const std::vector<DailyPortfolioValue>& values)
+{
+    daily_values = values;
+}
+
+void Portfolio::clearDailyValues()
+{
+    daily_values.clear();
+}
+
 void Portfolio::addTransaction(time_t date, double amount, TransactionType type, const std::string& notes)
 {
     transactions.emplace_back(date, amount, type, notes);
