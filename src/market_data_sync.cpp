@@ -276,6 +276,166 @@ namespace
         return true;
     }
 
+    bool fetchFromFinnhub(const std::string& symbol,
+                          const std::string& api_key,
+                          time_t from_ts,
+                          time_t to_ts,
+                          std::string& response_body,
+                          std::string& error)
+    {
+        const std::string url =
+            "https://finnhub.io/api/v1/stock/candle?symbol=" + symbol +
+            "&resolution=D&from=" + std::to_string(static_cast<long long>(from_ts)) +
+            "&to=" + std::to_string(static_cast<long long>(to_ts)) +
+            "&token=" + api_key;
+
+        const std::string command =
+            "curl -sS --fail --connect-timeout 15 --max-time 45 '" + shellEscapeSingleQuoted(url) + "'";
+
+        std::array<char, 4096> buffer = {};
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe == nullptr)
+        {
+            error = "Failed to execute curl for " + symbol;
+            return false;
+        }
+
+        response_body.clear();
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        {
+            response_body += buffer.data();
+        }
+
+        const int status = pclose(pipe);
+        if (status != 0)
+        {
+            error = "HTTP request failed for " + symbol;
+            return false;
+        }
+
+        return true;
+    }
+
+    bool parseNumberArrayField(const std::string& json,
+                               const std::string& key,
+                               std::vector<double>& values)
+    {
+        values.clear();
+
+        const std::string marker = "\"" + key + "\"";
+        const size_t key_pos = json.find(marker);
+        if (key_pos == std::string::npos)
+        {
+            return false;
+        }
+
+        const size_t open = json.find('[', key_pos + marker.size());
+        if (open == std::string::npos)
+        {
+            return false;
+        }
+
+        const size_t close = json.find(']', open + 1);
+        if (close == std::string::npos)
+        {
+            return false;
+        }
+
+        size_t cursor = open + 1;
+        while (cursor < close)
+        {
+            while (cursor < close && std::isspace(static_cast<unsigned char>(json[cursor])))
+            {
+                ++cursor;
+            }
+
+            size_t end = cursor;
+            while (end < close && json[end] != ',')
+            {
+                ++end;
+            }
+
+            if (end > cursor)
+            {
+                const std::string token = json.substr(cursor, end - cursor);
+                try
+                {
+                    values.push_back(std::stod(token));
+                }
+                catch (const std::exception&)
+                {
+                    return false;
+                }
+            }
+
+            cursor = end + 1;
+        }
+
+        return true;
+    }
+
+    bool parseDailyCloseSeriesFromFinnhub(const std::string& json,
+                                          std::map<long long, double>& prices_by_day,
+                                          std::string& error)
+    {
+        prices_by_day.clear();
+
+        if (json.find("\"s\":\"no_data\"") != std::string::npos)
+        {
+            error = "Finnhub returned no_data";
+            return false;
+        }
+
+        if (json.find("\"s\":\"ok\"") == std::string::npos)
+        {
+            error = "Finnhub returned non-ok status";
+            return false;
+        }
+
+        std::vector<double> closes;
+        std::vector<double> timestamps;
+        if (!parseNumberArrayField(json, "c", closes) ||
+            !parseNumberArrayField(json, "t", timestamps))
+        {
+            error = "Finnhub response missing close/timestamp arrays";
+            return false;
+        }
+
+        const size_t n = std::min(closes.size(), timestamps.size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            const time_t ts = static_cast<time_t>(std::llround(timestamps[i]));
+            if (ts <= 0)
+            {
+                continue;
+            }
+            prices_by_day[dayBucket(ts)] = closes[i];
+        }
+
+        if (prices_by_day.empty())
+        {
+            error = "Finnhub returned no close values";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool isLikelyRateLimitError(std::string message)
+    {
+        std::transform(
+            message.begin(),
+            message.end(),
+            message.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); }
+        );
+
+        return message.find("rate") != std::string::npos ||
+               message.find("limit") != std::string::npos ||
+               message.find("frequency") != std::string::npos ||
+               message.find("too many") != std::string::npos;
+    }
+
     bool parseDailyCloseSeries(const std::string& json,
                                std::map<long long, double>& prices_by_day,
                                std::string& error)
@@ -649,10 +809,16 @@ namespace MarketDataSync
     {
         SyncConfig config;
 
-        const char* api_key = std::getenv("ALPHAVANTAGE_API_KEY");
-        if (api_key != nullptr)
+        const char* alpha_api_key = std::getenv("ALPHAVANTAGE_API_KEY");
+        if (alpha_api_key != nullptr)
         {
-            config.api_key = api_key;
+            config.alpha_vantage_api_key = alpha_api_key;
+        }
+
+        const char* finnhub_api_key = std::getenv("FINNHUB_API_KEY");
+        if (finnhub_api_key != nullptr)
+        {
+            config.finnhub_api_key = finnhub_api_key;
         }
 
         const char* max_req = std::getenv("ALPHAVANTAGE_MAX_REQUESTS_PER_RUN");
@@ -871,6 +1037,8 @@ namespace MarketDataSync
         );
 
         bool rate_limited = false;
+        bool alpha_vantage_rate_limited = false;
+        size_t finnhub_request_count = 0;
 
         for (const auto& candidate : ordered_candidates)
         {
@@ -882,70 +1050,137 @@ namespace MarketDataSync
                 continue;
             }
 
-            if (config.api_key.empty())
-            {
-                std::cerr << "Skipping Alpha Vantage sync for " << ticker
-                          << " (ALPHAVANTAGE_API_KEY is not set)" << std::endl;
-                continue;
-            }
+            bool fetched_from_provider = false;
 
-            if (request_count >= config.max_requests_per_run)
+            if (!alpha_vantage_rate_limited)
             {
-                std::cerr << "Alpha Vantage request budget reached for this run ("
-                          << config.max_requests_per_run << ")" << std::endl;
-                rate_limited = true;
-                break;
-            }
-
-            if (!request_ledger.consume(config.max_requests_per_run))
-            {
-                std::cerr << "Alpha Vantage daily request budget reached for " << portfolio_name << std::endl;
-                rate_limited = true;
-                break;
-            }
-
-            if (request_count > 0 && config.min_seconds_between_requests > 0)
-            {
-                std::this_thread::sleep_for(std::chrono::seconds(config.min_seconds_between_requests));
-            }
-
-            std::string response_body;
-            std::string fetch_error;
-            if (!fetchFromAlphaVantage(ticker, config.api_key, response_body, fetch_error))
-            {
-                std::cerr << "Alpha Vantage fetch failed for " << ticker << ": " << fetch_error << std::endl;
-                if (fetch_error.find("limit") != std::string::npos ||
-                    fetch_error.find("frequency") != std::string::npos)
+                if (config.alpha_vantage_api_key.empty())
                 {
-                    rate_limited = true;
-                    break;
+                    std::cerr << "Skipping Alpha Vantage sync for " << ticker
+                              << " (ALPHAVANTAGE_API_KEY is not set)" << std::endl;
+                }
+                else
+                {
+                    if (request_count >= config.max_requests_per_run)
+                    {
+                        std::cerr << "Alpha Vantage request budget reached for this run ("
+                                  << config.max_requests_per_run << ")" << std::endl;
+                        alpha_vantage_rate_limited = true;
+                        rate_limited = true;
+                    }
+                    else if (!request_ledger.consume(config.max_requests_per_run))
+                    {
+                        std::cerr << "Alpha Vantage daily request budget reached for " << portfolio_name << std::endl;
+                        alpha_vantage_rate_limited = true;
+                        rate_limited = true;
+                    }
+                    else
+                    {
+                        if (request_count > 0 && config.min_seconds_between_requests > 0)
+                        {
+                            std::this_thread::sleep_for(std::chrono::seconds(config.min_seconds_between_requests));
+                        }
+
+                        std::string response_body;
+                        std::string fetch_error;
+                        if (!fetchFromAlphaVantage(ticker, config.alpha_vantage_api_key, response_body, fetch_error))
+                        {
+                            std::cerr << "Alpha Vantage fetch failed for " << ticker << ": " << fetch_error << std::endl;
+                            if (isLikelyRateLimitError(fetch_error))
+                            {
+                                alpha_vantage_rate_limited = true;
+                                rate_limited = true;
+                            }
+
+                            ++request_count;
+                        }
+                        else
+                        {
+                            std::map<long long, double> prices_by_day;
+                            std::string parse_error;
+                            if (!parseDailyCloseSeries(response_body, prices_by_day, parse_error))
+                            {
+                                std::cerr << "Failed to parse Alpha Vantage response for " << ticker
+                                          << ": " << parse_error << std::endl;
+
+                                if (isLikelyRateLimitError(parse_error))
+                                {
+                                    alpha_vantage_rate_limited = true;
+                                    rate_limited = true;
+                                }
+
+                                ++request_count;
+                            }
+                            else
+                            {
+                                if (!updateTickerPriceHistory(manager, portfolio_name, ticker, prices_by_day, earliest_needed_day))
+                                {
+                                    std::cerr << "Failed to persist market data for " << ticker << std::endl;
+                                }
+
+                                ++request_count;
+                                fetched_from_provider = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!fetched_from_provider && alpha_vantage_rate_limited)
+            {
+                if (config.finnhub_api_key.empty())
+                {
+                    std::cerr << "Skipping Finnhub fallback for " << ticker
+                              << " (FINNHUB_API_KEY is not set)" << std::endl;
+                    continue;
                 }
 
-                ++request_count;
+                if (finnhub_request_count > 0 && config.min_seconds_between_requests > 0)
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(config.min_seconds_between_requests));
+                }
+
+                const time_t from_ts = static_cast<time_t>(earliest_needed_day * static_cast<long long>(SECONDS_PER_DAY));
+                const time_t to_ts = std::time(nullptr);
+
+                std::string response_body;
+                std::string fetch_error;
+                if (!fetchFromFinnhub(ticker, config.finnhub_api_key, from_ts, to_ts, response_body, fetch_error))
+                {
+                    std::cerr << "Finnhub fallback fetch failed for " << ticker << ": " << fetch_error << std::endl;
+                    ++finnhub_request_count;
+                    continue;
+                }
+
+                std::map<long long, double> prices_by_day;
+                std::string parse_error;
+                if (!parseDailyCloseSeriesFromFinnhub(response_body, prices_by_day, parse_error))
+                {
+                    std::cerr << "Failed to parse Finnhub fallback response for " << ticker
+                              << ": " << parse_error << std::endl;
+                    ++finnhub_request_count;
+                    continue;
+                }
+
+                if (!updateTickerPriceHistory(manager, portfolio_name, ticker, prices_by_day, earliest_needed_day))
+                {
+                    std::cerr << "Failed to persist market data for " << ticker << std::endl;
+                }
+
+                ++finnhub_request_count;
+                fetched_from_provider = true;
+            }
+
+            if (!fetched_from_provider && !alpha_vantage_rate_limited)
+            {
+                // Non-rate-limit provider errors are logged above; keep moving.
                 continue;
             }
-
-            std::map<long long, double> prices_by_day;
-            std::string parse_error;
-            if (!parseDailyCloseSeries(response_body, prices_by_day, parse_error))
-            {
-                std::cerr << "Failed to parse Alpha Vantage response for " << ticker
-                          << ": " << parse_error << std::endl;
-                ++request_count;
-                continue;
-            }
-
-            if (!updateTickerPriceHistory(manager, portfolio_name, ticker, prices_by_day, earliest_needed_day))
-            {
-                std::cerr << "Failed to persist market data for " << ticker << std::endl;
-            }
-
-            ++request_count;
         }
 
         if (rate_limited)
         {
-            std::cerr << "Continuing with available price history after hitting Alpha Vantage limits" << std::endl;
+            std::cerr << "Alpha Vantage rate-limited; attempted Finnhub fallback where configured" << std::endl;
         }
 
         return recomputePortfolioDailyValues(manager, portfolio_name);
