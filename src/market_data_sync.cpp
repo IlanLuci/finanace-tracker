@@ -448,6 +448,16 @@ namespace
         return false;
     }
 
+    time_t latestPriceHistoryUpdate(const StockData& stock)
+    {
+        time_t latest = 0;
+        for (const auto& point : stock.getPriceHistory())
+        {
+            latest = std::max(latest, point.last_updated);
+        }
+        return latest;
+    }
+
     bool collectTickerEarliestDays(const Portfolio& portfolio,
                                    std::unordered_map<std::string, long long>& earliest_day_by_ticker)
     {
@@ -819,28 +829,54 @@ namespace MarketDataSync
             std::cerr << "Failed to load Alpha Vantage request ledger for " << portfolio_name << std::endl;
         }
 
-        size_t request_count = 0;
-        std::vector<std::string> ordered_tickers;
-        ordered_tickers.reserve(earliest_day_by_ticker.size());
-        for (const auto& [ticker, _] : earliest_day_by_ticker)
+        struct SyncCandidate
         {
-            ordered_tickers.push_back(ticker);
-        }
-        std::sort(ordered_tickers.begin(), ordered_tickers.end());
+            std::string ticker;
+            long long earliest_needed_day = 0;
+            time_t price_last_updated = 0;
+            StockData stock;
+        };
 
-        bool rate_limited = false;
+        size_t request_count = 0;
+        std::vector<SyncCandidate> ordered_candidates;
+        ordered_candidates.reserve(earliest_day_by_ticker.size());
 
-        for (const auto& ticker : ordered_tickers)
+        for (const auto& [ticker, earliest_needed_day] : earliest_day_by_ticker)
         {
             StockData stock;
-            const bool has_stock_file = manager.loadStockData(portfolio_name, ticker, stock);
-            if (!has_stock_file)
+            if (!manager.loadStockData(portfolio_name, ticker, stock))
             {
                 stock = StockData(ticker, ticker);
             }
 
-            const long long earliest_needed_day = earliest_day_by_ticker[ticker];
-            const bool needs_fetch = shouldFetchTickerData(stock, earliest_needed_day);
+            ordered_candidates.push_back(SyncCandidate{
+                ticker,
+                earliest_needed_day,
+                latestPriceHistoryUpdate(stock),
+                std::move(stock)
+            });
+        }
+
+        std::sort(
+            ordered_candidates.begin(),
+            ordered_candidates.end(),
+            [](const SyncCandidate& lhs, const SyncCandidate& rhs)
+            {
+                if (lhs.price_last_updated != rhs.price_last_updated)
+                {
+                    return lhs.price_last_updated < rhs.price_last_updated;
+                }
+                return lhs.ticker < rhs.ticker;
+            }
+        );
+
+        bool rate_limited = false;
+
+        for (const auto& candidate : ordered_candidates)
+        {
+            const std::string& ticker = candidate.ticker;
+            const long long earliest_needed_day = candidate.earliest_needed_day;
+            const bool needs_fetch = shouldFetchTickerData(candidate.stock, earliest_needed_day);
             if (!needs_fetch)
             {
                 continue;
