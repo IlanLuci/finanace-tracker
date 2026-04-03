@@ -4,6 +4,8 @@
 #include "portfolio_data.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstddef>
@@ -15,6 +17,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <cstdio>
 #include <map>
 #include <netinet/in.h>
 #include <optional>
@@ -30,6 +33,37 @@ namespace
 {
     constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 2;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
+    constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
+    constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
+
+    time_t nextDailySyncTimeLocal(time_t now)
+    {
+        std::tm local_tm = {};
+        std::tm* local_ptr = std::localtime(&now);
+        if (local_ptr == nullptr)
+        {
+            return now + 24 * 60 * 60;
+        }
+
+        local_tm = *local_ptr;
+        local_tm.tm_hour = DAILY_SYNC_HOUR_LOCAL;
+        local_tm.tm_min = DAILY_SYNC_MINUTE_LOCAL;
+        local_tm.tm_sec = 0;
+
+        time_t scheduled = std::mktime(&local_tm);
+        if (scheduled <= now)
+        {
+            local_tm.tm_mday += 1;
+            scheduled = std::mktime(&local_tm);
+        }
+
+        if (scheduled <= now)
+        {
+            return now + 24 * 60 * 60;
+        }
+
+        return scheduled;
+    }
 
     struct HttpRequest
     {
@@ -471,6 +505,135 @@ namespace
             [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); }
         );
         return upper;
+    }
+
+    std::string shellEscapeSingleQuoted(const std::string& value)
+    {
+        std::string escaped;
+        escaped.reserve(value.size() + 8);
+
+        for (const char ch : value)
+        {
+            if (ch == '\'')
+            {
+                escaped += "'\\''";
+            }
+            else
+            {
+                escaped.push_back(ch);
+            }
+        }
+
+        return escaped;
+    }
+
+    bool isFinitePositive(double value)
+    {
+        return std::isfinite(value) && value > 0.0;
+    }
+
+    bool isFiniteNonNegative(double value)
+    {
+        return std::isfinite(value) && value >= 0.0;
+    }
+
+    bool isValidTickerSymbol(const std::string& ticker)
+    {
+        if (ticker.empty() || ticker.size() > 12)
+        {
+            return false;
+        }
+
+        for (const char ch : ticker)
+        {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (!std::isalnum(uch) && ch != '.' && ch != '-' && ch != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool maybeTickerExistsOnYahoo(const std::string& ticker, bool& is_invalid_ticker)
+    {
+        is_invalid_ticker = false;
+
+        const std::string url =
+            "https://query1.finance.yahoo.com/v8/finance/chart/" + ticker +
+            "?interval=1d&range=5d";
+
+        const std::string command =
+            "curl -sS --compressed -w '\\n%{http_code}' --connect-timeout 8 --max-time 15 "
+            "-H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' "
+            "-H 'Accept: application/json' "
+            "'" + shellEscapeSingleQuoted(url) + "'";
+
+        std::array<char, 4096> buffer = {};
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe == nullptr)
+        {
+            return false;
+        }
+
+        std::string response;
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        {
+            response += buffer.data();
+        }
+
+        const int status = pclose(pipe);
+        if (status != 0)
+        {
+            return false;
+        }
+
+        const size_t last_newline = response.rfind('\n');
+        if (last_newline == std::string::npos || last_newline + 1 >= response.size())
+        {
+            return false;
+        }
+
+        std::string http_status_str = response.substr(last_newline + 1);
+        const size_t end = http_status_str.find_last_not_of(" \n\r\t");
+        if (end == std::string::npos)
+        {
+            return false;
+        }
+        http_status_str.erase(end + 1);
+        response = response.substr(0, last_newline);
+
+        int http_code = 0;
+        try
+        {
+            http_code = std::stoi(http_status_str);
+        }
+        catch (const std::exception&)
+        {
+            return false;
+        }
+
+        if (http_code == 404)
+        {
+            is_invalid_ticker = true;
+            return true;
+        }
+
+        if (http_code < 200 || http_code >= 300)
+        {
+            return false;
+        }
+
+        if (response.find("\"result\":null") != std::string::npos ||
+            response.find("No data found, symbol may be delisted") != std::string::npos ||
+            response.find("\"No matching Symbol.\"") != std::string::npos)
+        {
+            is_invalid_ticker = true;
+            return true;
+        }
+
+        return true;
     }
 
     std::string jsonEscape(const std::string& value)
@@ -1311,7 +1474,12 @@ namespace
             return makeJsonResponse(400, makeErrorBody("Ticker is required"));
         }
 
-        if (shares <= 0.0)
+        if (!isValidTickerSymbol(normalized_ticker))
+        {
+            return makeJsonResponse(400, makeErrorBody("Ticker contains invalid characters or length"));
+        }
+
+        if (!isFinitePositive(shares))
         {
             if (type != TransactionType::DIVIDEND)
             {
@@ -1328,7 +1496,22 @@ namespace
             }
         }
 
+        if (type == TransactionType::BUY_STOCK)
+        {
+            bool is_invalid_ticker = false;
+            const bool checked = maybeTickerExistsOnYahoo(normalized_ticker, is_invalid_ticker);
+            if (checked && is_invalid_ticker)
+            {
+                return makeJsonResponse(400, makeErrorBody("Ticker was not found by market data provider"));
+            }
+        }
+
         const double next_capital = portfolio.getAvailableCapital() + amount;
+        if (!std::isfinite(next_capital))
+        {
+            return makeJsonResponse(400, makeErrorBody("Invalid transaction amount"));
+        }
+
         if (next_capital < -1e-9)
         {
             return makeJsonResponse(409, makeErrorBody("Insufficient available capital"));
@@ -1459,9 +1642,12 @@ namespace
 
                 const std::string action = segments[4];
                 const std::string notes = getObjectString(body, "notes").value_or("");
-                const time_t date = static_cast<time_t>(
-                    std::llround(getObjectNumber(body, "date").value_or(static_cast<double>(std::time(nullptr))))
-                );
+                const double date_number = getObjectNumber(body, "date").value_or(static_cast<double>(std::time(nullptr)));
+                if (!std::isfinite(date_number) || date_number <= 0.0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("date must be a valid unix timestamp"));
+                }
+                const time_t date = static_cast<time_t>(std::llround(date_number));
 
                 if (action == "buy")
                 {
@@ -1472,7 +1658,13 @@ namespace
                     {
                         return makeJsonResponse(400, makeErrorBody("buy requires ticker, shares, price_per_share"));
                     }
-                    if (price.value() < 0.0)
+
+                    if (!isFinitePositive(shares.value()))
+                    {
+                        return makeJsonResponse(400, makeErrorBody("shares must be > 0"));
+                    }
+
+                    if (!isFiniteNonNegative(price.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("price_per_share must be >= 0"));
                     }
@@ -1500,7 +1692,13 @@ namespace
                     {
                         return makeJsonResponse(400, makeErrorBody("sell requires ticker, shares, price_per_share"));
                     }
-                    if (price.value() < 0.0)
+
+                    if (!isFinitePositive(shares.value()))
+                    {
+                        return makeJsonResponse(400, makeErrorBody("shares must be > 0"));
+                    }
+
+                    if (!isFiniteNonNegative(price.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("price_per_share must be >= 0"));
                     }
@@ -1527,7 +1725,8 @@ namespace
                     {
                         return makeJsonResponse(400, makeErrorBody("dividend requires ticker and amount"));
                     }
-                    if (amount.value() < 0.0)
+
+                    if (!isFiniteNonNegative(amount.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("amount must be >= 0"));
                     }
@@ -1559,7 +1758,7 @@ namespace
                 if (action == "deposit")
                 {
                     auto amount = getObjectNumber(body, "amount");
-                    if (!amount.has_value() || amount.value() < 0.0)
+                    if (!amount.has_value() || !isFiniteNonNegative(amount.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("deposit requires non-negative amount"));
                     }
@@ -1577,7 +1776,7 @@ namespace
                 if (action == "withdrawal")
                 {
                     auto amount = getObjectNumber(body, "amount");
-                    if (!amount.has_value() || amount.value() < 0.0)
+                    if (!amount.has_value() || !isFiniteNonNegative(amount.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("withdrawal requires non-negative amount"));
                     }
@@ -1595,7 +1794,7 @@ namespace
                 if (action == "interest")
                 {
                     auto amount = getObjectNumber(body, "amount");
-                    if (!amount.has_value() || amount.value() < 0.0)
+                    if (!amount.has_value() || !isFiniteNonNegative(amount.value()))
                     {
                         return makeJsonResponse(400, makeErrorBody("interest requires non-negative amount"));
                     }
@@ -1675,6 +1874,29 @@ bool PortfolioApiServer::start()
             if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
             {
                 std::cerr << "Startup market-data sync completed with errors" << std::endl;
+            }
+        }
+    ).detach();
+
+    // Keep daily values current by syncing once per day after market close.
+    const std::string periodic_sync_data_dir = data_directory;
+    std::thread(
+        [periodic_sync_data_dir]()
+        {
+            while (true)
+            {
+                const time_t now = std::time(nullptr);
+                const time_t next_sync = nextDailySyncTimeLocal(now);
+                const auto sleep_seconds =
+                    std::chrono::seconds(std::max<time_t>(1, next_sync - now));
+                std::this_thread::sleep_for(sleep_seconds);
+
+                PortfolioManager sync_manager(periodic_sync_data_dir);
+                const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+                if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
+                {
+                    std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
+                }
             }
         }
     ).detach();

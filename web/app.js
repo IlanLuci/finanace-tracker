@@ -298,6 +298,7 @@ function stockPerformance(stock) {
   const perShareChange = latestPrice - averagePrice;
   const totalChange = perShareChange * sharesOwned;
   const percentChange = averagePrice > 0 ? (perShareChange / averagePrice) * 100 : 0;
+  const isZeroCostBasisPosition = sharesOwned > 0 && averagePrice <= 0 && latestPrice > 0;
 
   return {
     averagePrice,
@@ -306,11 +307,16 @@ function stockPerformance(stock) {
     perShareChange,
     totalChange,
     percentChange,
-    hasBasis: averagePrice > 0 && sharesOwned > 0
+    hasBasis: averagePrice > 0 && sharesOwned > 0,
+    isZeroCostBasisPosition
   };
 }
 
-function stockToneClass(totalChange, hasBasis) {
+function stockToneClass(totalChange, hasBasis, isZeroCostBasisPosition = false) {
+  if (isZeroCostBasisPosition) {
+    return "stock-card-positive";
+  }
+
   if (!hasBasis) {
     return "stock-card-neutral";
   }
@@ -601,7 +607,11 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     .map(
       (stock) => {
         const performance = stockPerformance(stock);
-        const toneClass = stockToneClass(performance.totalChange, performance.hasBasis);
+        const toneClass = stockToneClass(
+          performance.totalChange,
+          performance.hasBasis,
+          performance.isZeroCostBasisPosition
+        );
         const perShareLabel = `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`;
         const totalLabel = `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`;
 
@@ -646,7 +656,11 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
 function showStockDialog(stock) {
   const performance = stockPerformance(stock);
-  const toneClass = stockToneClass(performance.totalChange, performance.hasBasis);
+  const toneClass = stockToneClass(
+    performance.totalChange,
+    performance.hasBasis,
+    performance.isZeroCostBasisPosition
+  );
   const events = stock.recent_events || [];
 
   el.stockDialogTitle.textContent = `${stock.ticker} • ${stock.company_name || "Company"}`;

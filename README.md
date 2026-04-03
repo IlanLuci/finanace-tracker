@@ -227,13 +227,13 @@ make clean        # Remove build artifacts
 - `--port` sets the listen port (default `8080`).
 - `--data-dir` points to the portfolio storage root (default `data`).
 
-## Market Close Price Sync (Alpha Vantage + Finnhub Fallback)
+## Market Close Price Sync (Yahoo Finance Primary + Alpha Vantage Backup)
 
 On startup, the application now:
 - Scans all portfolios and stock tickers found in transaction history.
 - Checks whether daily close prices are missing (empty history, stale latest day, or gaps around event days).
-- Fetches `TIME_SERIES_DAILY` from Alpha Vantage for tickers that need backfill.
-- If Alpha Vantage hits a rate limit, automatically falls back to Finnhub candles for remaining tickers in that run.
+- Fetches daily candles from Yahoo Finance (unlimited, free, no API key required) for tickers that need backfill.
+- If Yahoo Finance fails for any reason, automatically falls back to Alpha Vantage for remaining tickers in that run.
 - Saves market-close prices into each stock file under `data/<portfolio>/stocks/<TICKER>.dat`.
 - Recomputes and persists historical daily portfolio totals from transactions + close prices.
 
@@ -243,17 +243,15 @@ After any API transaction mutation (`buy`, `sell`, `dividend`, `deposit`, `withd
 
 ```bash
 export ALPHAVANTAGE_API_KEY="your_api_key_here"
-export FINNHUB_API_KEY="your_finnhub_key_here"
 export ALPHAVANTAGE_MAX_REQUESTS_PER_RUN=25
 export ALPHAVANTAGE_MIN_SECONDS_BETWEEN_REQUESTS=12
 ```
 
-- `ALPHAVANTAGE_API_KEY`: required for automatic market data fetches.
-- `FINNHUB_API_KEY`: optional backup provider key used when Alpha Vantage is rate-limited.
-- `ALPHAVANTAGE_MAX_REQUESTS_PER_RUN`: hard cap per process start. This prevents exhausting daily quotas.
+- `ALPHAVANTAGE_API_KEY`: optional backup provider key used when Yahoo Finance is unavailable or rate-limited.
+- `ALPHAVANTAGE_MAX_REQUESTS_PER_RUN`: hard cap per process start for the Alpha Vantage fallback. This prevents exhausting daily quotas.
 - `ALPHAVANTAGE_MIN_SECONDS_BETWEEN_REQUESTS`: delay between calls to reduce per-minute limit hits.
 
-If no API key is set, the app still recomputes totals using already-saved prices and logs a warning for skipped fetches.
+Yahoo Finance is the primary provider and requires no configuration. If Alpha Vantage is configured, it serves as a fallback. If no Alpha Vantage key is set and Yahoo Finance fails, the app will log a warning for skipped fetches but continue operation using already-saved prices.
 
 ## Web API Endpoints
 
