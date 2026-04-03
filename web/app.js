@@ -290,6 +290,38 @@ function trendChipClass(percentChange, hasTrend) {
   return "chip-neutral";
 }
 
+function stockPerformance(stock) {
+  const averagePrice = safeNumber(stock?.average_purchase_price);
+  const latestPrice = safeNumber(stock?.latest_close_price);
+  const sharesOwned = safeNumber(stock?.shares_owned);
+  const perShareChange = latestPrice - averagePrice;
+  const totalChange = perShareChange * sharesOwned;
+  const percentChange = averagePrice > 0 ? (perShareChange / averagePrice) * 100 : 0;
+
+  return {
+    averagePrice,
+    latestPrice,
+    sharesOwned,
+    perShareChange,
+    totalChange,
+    percentChange,
+    hasBasis: averagePrice > 0 && sharesOwned > 0
+  };
+}
+
+function stockToneClass(totalChange, hasBasis) {
+  if (!hasBasis) {
+    return "stock-card-neutral";
+  }
+  if (totalChange > 0.0001) {
+    return "stock-card-positive";
+  }
+  if (totalChange < -0.0001) {
+    return "stock-card-negative";
+  }
+  return "stock-card-neutral";
+}
+
 function periodSelectMarkup(selectId, selectedPeriod) {
   const options = PERIOD_OPTIONS
     .map((period) => `<option value="${period}"${period === selectedPeriod ? " selected" : ""}>${period}</option>`)
@@ -566,18 +598,27 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const sortedStocks = [...stocks].sort((a, b) => (b.position_market_value || 0) - (a.position_market_value || 0));
   el.stocksList.innerHTML = sortedStocks
     .map(
-      (stock) => `<article class="stock-card fade-up" data-ticker="${stock.ticker}">
+      (stock) => {
+        const performance = stockPerformance(stock);
+        const toneClass = stockToneClass(performance.totalChange, performance.hasBasis);
+        const perShareLabel = `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`;
+        const totalLabel = `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`;
+
+        return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
         <div class="stock-top">
           <strong>${stock.ticker}</strong>
-          <span>${currency(stock.position_market_value)}</span>
+          <span class="stock-market-value">${currency(stock.position_market_value)}</span>
         </div>
         <div class="stock-name">${stock.company_name || "Company name not available"}</div>
+        <div class="stock-pnl ${toneClass}">${totalLabel} <span>${performance.hasBasis ? `${performance.percentChange >= 0 ? "+" : ""}${performance.percentChange.toFixed(2)}%` : "No cost basis"}</span></div>
         <div class="stock-stats">
           <span>Shares: ${sharesFormat(stock.shares_owned)}</span>
           <span>Avg Cost: ${currency(stock.average_purchase_price)}</span>
-          <span>Latest Close: ${currency(stock.latest_close_price)} on ${dateLabel(stock.latest_close_date)}</span>
+          <span>Latest Close: ${currency(stock.latest_close_price)} on ${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</span>
+          <span>${perShareLabel}</span>
         </div>
-      </article>`
+      </article>`;
+      }
     )
     .join("") || "<p>No stock data available.</p>";
 
@@ -603,31 +644,45 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 }
 
 function showStockDialog(stock) {
-  const gainPerShare = (stock.latest_close_price || 0) - (stock.average_purchase_price || 0);
-  const unrealized = gainPerShare * (stock.shares_owned || 0);
+  const performance = stockPerformance(stock);
+  const toneClass = stockToneClass(performance.totalChange, performance.hasBasis);
   const events = stock.recent_events || [];
 
   el.stockDialogTitle.textContent = `${stock.ticker} • ${stock.company_name || "Company"}`;
   el.stockDialogBody.innerHTML = `
+    <article class="panel stock-dialog-summary ${toneClass}">
+      <div class="panel-head">
+        <h3>Position Snapshot</h3>
+        <span class="chip ${trendChipClass(performance.percentChange, performance.hasBasis)}">${performance.hasBasis ? `${performance.percentChange >= 0 ? "+" : ""}${performance.percentChange.toFixed(2)}%` : "No basis"}</span>
+      </div>
+      <div class="stock-dialog-grid">
+        <div><span>Market Value</span><strong>${currency(stock.position_market_value)}</strong></div>
+        <div><span>Unrealized P/L</span><strong>${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}</strong></div>
+        <div><span>Per Share</span><strong>${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)}</strong></div>
+        <div><span>Latest Close</span><strong>${currency(stock.latest_close_price)}</strong></div>
+      </div>
+    </article>
     <section class="metric-grid">
       ${metricCard("Shares Owned", sharesFormat(stock.shares_owned))}
       ${metricCard("Average Cost", currency(stock.average_purchase_price))}
       ${metricCard("Latest Close", currency(stock.latest_close_price), dateLabel(stock.latest_close_date))}
-      ${metricCard("Unrealized P/L", currency(unrealized), `${gainPerShare >= 0 ? "+" : ""}${currency(gainPerShare)} per share`)}
+      ${metricCard("Unrealized P/L", `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`, `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`)}
     </section>
     <article class="panel">
       <div class="panel-head">
         <h3>Recent Company Events</h3>
         <span class="chip">${events.length} entries</span>
       </div>
-      ${events.length ? renderTransactionTable(events.map((e) => ({
-        date: e.date,
-        type: e.type,
-        stock_symbol: stock.ticker,
-        shares: e.shares,
-        amount: e.cash_amount,
-        notes: e.notes || ""
-      })) ) : "<p>No recent events available.</p>"}
+      <div class="dialog-table-wrap">
+        ${events.length ? renderTransactionTable(events.map((e) => ({
+          date: e.date,
+          type: e.type,
+          stock_symbol: stock.ticker,
+          shares: e.shares,
+          amount: e.cash_amount,
+          notes: e.notes || ""
+        }))) : "<p>No recent events available.</p>"}
+      </div>
     </article>
   `;
 
@@ -791,7 +846,7 @@ async function showAllTransactions() {
 
   try {
     const payload = await apiGet(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions`);
-    el.transactionsHistory.innerHTML = renderTransactionTable(payload.transactions || []);
+    el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [])}</div>`;
     el.transactionsDialog.showModal();
   } catch (error) {
     showFlash(error.message);

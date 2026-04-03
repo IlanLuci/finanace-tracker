@@ -353,6 +353,22 @@ h3 {
   transition: transform 150ms ease, box-shadow 150ms ease;
 }
 
+article.stock-card-positive {
+  border-color: rgba(52, 211, 153, 0.32);
+  background: linear-gradient(180deg, rgba(15, 44, 35, 0.96) 0%, rgba(20, 35, 35, 0.92) 100%);
+  box-shadow: 0 12px 24px rgba(20, 83, 45, 0.14);
+}
+
+article.stock-card-negative {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: linear-gradient(180deg, rgba(52, 23, 27, 0.96) 0%, rgba(38, 21, 27, 0.92) 100%);
+  box-shadow: 0 12px 24px rgba(127, 29, 29, 0.16);
+}
+
+article.stock-card-neutral {
+  border-color: rgba(107, 114, 128, 0.4);
+}
+
 .stock-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 10px 22px rgba(17, 42, 36, 0.14);
@@ -369,11 +385,45 @@ h3 {
   font-size: 1rem;
 }
 
+.stock-market-value {
+  font-weight: 700;
+}
+
 .stock-name {
   color: var(--muted);
   font-size: 13px;
   min-height: 2.5em;
   margin-top: 4px;
+}
+
+.stock-pnl {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.stock-pnl span {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.stock-pnl.stock-card-positive,
+.stock-pnl.stock-card-positive span {
+  color: #6ee7b7;
+}
+
+.stock-pnl.stock-card-negative,
+.stock-pnl.stock-card-negative span {
+  color: #fca5a5;
+}
+
+.stock-pnl.stock-card-neutral,
+.stock-pnl.stock-card-neutral span {
+  color: #d1d5db;
 }
 
 .stock-stats {
@@ -413,6 +463,11 @@ h3 {
 
 .tx-table tbody tr:hover {
   background: rgba(59, 130, 246, 0.15);
+}
+
+.tx-table td:first-child,
+.tx-table th:first-child {
+  white-space: nowrap;
 }
 
 .positive {
@@ -474,11 +529,19 @@ h3 {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.56);
+  background: linear-gradient(180deg, rgba(20, 27, 39, 0.9) 0%, rgba(26, 35, 50, 0.9) 100%);
 }
 
 #transactionDialog {
   width: min(620px, 94vw);
+}
+
+#transactionsDialog {
+  width: min(1080px, 96vw);
+}
+
+#stockDialog {
+  width: min(1080px, 96vw);
 }
 
 .field-row {
@@ -511,13 +574,54 @@ label {
   font-size: 14px;
 }
 
+select {
+  width: 100%;
+}
+
 .dialog {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   width: min(980px, 94vw);
   max-height: 85vh;
   padding: 18px;
-  background: #1a2332;
+  background: linear-gradient(180deg, rgba(16, 21, 30, 0.98) 0%, rgba(20, 27, 39, 0.98) 100%);
+  color: var(--ink);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.dialog,
+.dialog * {
+  color: var(--ink);
+}
+
+.dialog button,
+.dialog input,
+.dialog select,
+.dialog textarea {
+  font: inherit;
+}
+
+.dialog input,
+.dialog select,
+.dialog textarea {
+  background: rgba(26, 35, 50, 0.9);
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+.dialog option {
+  background: #141b27;
+  color: var(--ink);
+}
+
+.dialog .ghost-btn {
+  background: rgba(26, 35, 50, 0.85);
+  color: var(--ink);
+}
+
+.dialog .ghost-btn:hover {
+  background: rgba(35, 48, 71, 0.95);
 }
 
 .dialog::backdrop {
@@ -534,6 +638,9 @@ label {
 #stockDialogBody {
   display: grid;
   gap: 14px;
+  max-height: calc(85vh - 96px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 #stockDialogBody .metric-grid {
@@ -544,6 +651,57 @@ label {
 #stockDialogBody .panel {
   margin: 0;
   padding: 16px;
+}
+
+.stock-dialog-summary {
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.96) 0%, rgba(12, 18, 28, 0.96) 100%);
+}
+
+.stock-dialog-summary.stock-card-positive {
+  border-color: rgba(52, 211, 153, 0.28);
+}
+
+.stock-dialog-summary.stock-card-negative {
+  border-color: rgba(239, 68, 68, 0.28);
+}
+
+.stock-dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.stock-dialog-grid div {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stock-dialog-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stock-dialog-grid strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 1rem;
+}
+
+.dialog-table-wrap {
+  max-height: 58vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.dialog-table-wrap .tx-table {
+  margin: 0;
 }
 
 #stockDialogBody .panel-head {
@@ -608,6 +766,10 @@ label {
 
   #stockDialogBody {
     gap: 12px;
+  }
+
+  .stock-dialog-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   #stockDialogBody .metric-grid {
