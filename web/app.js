@@ -1,4 +1,5 @@
 const API_STORAGE_KEY = "portfolio-api-base";
+const CURRENT_PORTFOLIO_KEY = "portfolio-current";
 
 const state = {
   apiBase: localStorage.getItem(API_STORAGE_KEY) || "",
@@ -710,14 +711,20 @@ async function openPortfolio(name) {
       { label: "Dashboard", onClick: showDashboard },
       { label: portfolioDisplayName(name) }
     ]);
+
+    localStorage.setItem(CURRENT_PORTFOLIO_KEY, name);
+    return true;
   } catch (error) {
     showFlash(error.message);
+    return false;
   }
 }
 
 function showDashboard() {
   setActiveView("dashboard");
   setBreadcrumbs([{ label: "Dashboard" }]);
+  state.currentPortfolio = null;
+  localStorage.removeItem(CURRENT_PORTFOLIO_KEY);
 }
 
 function parseDateTimeLocalToUnix(value) {
@@ -859,6 +866,16 @@ async function loadDashboard() {
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
     renderDashboard();
+
+    const savedPortfolio = localStorage.getItem(CURRENT_PORTFOLIO_KEY);
+    if (savedPortfolio) {
+      const restored = await openPortfolio(savedPortfolio);
+      if (restored) {
+        return;
+      }
+      localStorage.removeItem(CURRENT_PORTFOLIO_KEY);
+    }
+
     showDashboard();
   } catch (error) {
     showFlash(`Unable to load portfolios. ${error.message}. Check API Settings if needed.`);
