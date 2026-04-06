@@ -8,12 +8,7 @@ class PortfolioManager;
 
 namespace MarketDataSync
 {
-    struct SyncConfig
-    {
-        std::string alpha_vantage_api_key;
-        size_t max_requests_per_run = 25;
-        int min_seconds_between_requests = 12;
-    };
+    struct SyncConfig {};
 
     SyncConfig configFromEnvironment();
 
