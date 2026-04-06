@@ -11,7 +11,8 @@ enum class PortfolioType : uint8_t
 {
     BROKERAGE = 0,
     ROTH_IRA = 1,
-    TRADITIONAL_IRA = 2
+    TRADITIONAL_IRA = 2,
+    WATCHLIST = 3
 };
 
 // Daily portfolio value record

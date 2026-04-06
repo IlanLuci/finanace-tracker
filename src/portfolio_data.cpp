@@ -63,7 +63,7 @@ namespace
 
     bool isValidPortfolioType(uint8_t type_byte)
     {
-        return type_byte <= static_cast<uint8_t>(PortfolioType::TRADITIONAL_IRA);
+        return type_byte <= static_cast<uint8_t>(PortfolioType::WATCHLIST);
     }
 
     bool isValidTransactionType(uint8_t type_byte)
@@ -1402,6 +1402,14 @@ bool PortfolioManager::savePortfolio(const std::string& name, const Portfolio& p
 
     const std::string filepath = getPortfolioFilePath(name);
     const std::string stocks_dir = getStocksDirectoryPath(name);
+
+    // WATCHLIST portfolios intentionally manage stock files outside of
+    // transaction-derived reconciliation; do not prune symbols on save.
+    if (portfolio.getType() == PortfolioType::WATCHLIST)
+    {
+        return portfolio.saveToFile(filepath);
+    }
+
     try
     {
         if (!fs::exists(stocks_dir))

@@ -24,6 +24,7 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -35,6 +36,7 @@ namespace
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
+    std::mutex g_data_access_mutex;
 
     time_t nextDailySyncTimeLocal(time_t now)
     {
@@ -603,6 +605,10 @@ namespace
         {
             return PortfolioType::TRADITIONAL_IRA;
         }
+        if (normalized == "WATCHLIST")
+        {
+            return PortfolioType::WATCHLIST;
+        }
 
         return std::nullopt;
     }
@@ -767,6 +773,179 @@ namespace
 
         if (http_code != 200)
         {
+            // Some Yahoo environments intermittently return 401 for the batch quote API.
+            // Fall back to per-symbol chart endpoint so live features still work.
+            if (http_code == 401)
+            {
+                auto parseJsonNumberField = [](const std::string& json,
+                                               const std::string& key,
+                                               double& out_value) -> bool
+                {
+                    const std::string marker = "\"" + key + "\":";
+                    const size_t pos = json.find(marker);
+                    if (pos == std::string::npos)
+                    {
+                        return false;
+                    }
+
+                    size_t start = pos + marker.size();
+                    while (start < json.size() && std::isspace(static_cast<unsigned char>(json[start])))
+                    {
+                        ++start;
+                    }
+
+                    size_t end = start;
+                    while (end < json.size())
+                    {
+                        const char ch = json[end];
+                        if ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '+' || ch == 'e' || ch == 'E')
+                        {
+                            ++end;
+                            continue;
+                        }
+                        break;
+                    }
+
+                    if (end <= start)
+                    {
+                        return false;
+                    }
+
+                    try
+                    {
+                        out_value = std::stod(json.substr(start, end - start));
+                        return std::isfinite(out_value);
+                    }
+                    catch (const std::exception&)
+                    {
+                        return false;
+                    }
+                };
+
+                auto parseJsonStringField = [](const std::string& json,
+                                               const std::string& key,
+                                               std::string& out_value) -> bool
+                {
+                    const std::string marker = "\"" + key + "\":";
+                    const size_t pos = json.find(marker);
+                    if (pos == std::string::npos)
+                    {
+                        return false;
+                    }
+
+                    size_t quote_start = json.find('"', pos + marker.size());
+                    if (quote_start == std::string::npos)
+                    {
+                        return false;
+                    }
+
+                    size_t quote_end = json.find('"', quote_start + 1);
+                    if (quote_end == std::string::npos)
+                    {
+                        return false;
+                    }
+
+                    out_value = json.substr(quote_start + 1, quote_end - quote_start - 1);
+                    return true;
+                };
+
+                size_t fallback_success_count = 0;
+                for (const std::string& symbol_raw : symbols)
+                {
+                    const std::string symbol = upperCopy(trim(symbol_raw));
+                    if (symbol.empty())
+                    {
+                        continue;
+                    }
+
+                    const std::string chart_url =
+                        "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol +
+                        "?interval=1d&range=1d";
+
+                    const std::string chart_command =
+                        "curl -sS --compressed -w '\\n%{http_code}' --connect-timeout 8 --max-time 20 "
+                        "-H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' "
+                        "-H 'Accept: application/json' "
+                        "'" + shellEscapeSingleQuoted(chart_url) + "'";
+
+                    std::array<char, 4096> chart_buffer = {};
+                    FILE* chart_pipe = popen(chart_command.c_str(), "r");
+                    if (chart_pipe == nullptr)
+                    {
+                        continue;
+                    }
+
+                    std::string chart_response;
+                    while (fgets(chart_buffer.data(), static_cast<int>(chart_buffer.size()), chart_pipe) != nullptr)
+                    {
+                        chart_response += chart_buffer.data();
+                    }
+
+                    const int chart_status = pclose(chart_pipe);
+                    if (chart_status != 0)
+                    {
+                        continue;
+                    }
+
+                    const size_t chart_last_newline = chart_response.rfind('\n');
+                    if (chart_last_newline == std::string::npos || chart_last_newline + 1 >= chart_response.size())
+                    {
+                        continue;
+                    }
+
+                    std::string chart_http_status_str = chart_response.substr(chart_last_newline + 1);
+                    const size_t chart_trim_end = chart_http_status_str.find_last_not_of(" \n\r\t");
+                    if (chart_trim_end == std::string::npos)
+                    {
+                        continue;
+                    }
+                    chart_http_status_str.erase(chart_trim_end + 1);
+                    chart_response = chart_response.substr(0, chart_last_newline);
+
+                    int chart_http_code = 0;
+                    try
+                    {
+                        chart_http_code = std::stoi(chart_http_status_str);
+                    }
+                    catch (const std::exception&)
+                    {
+                        continue;
+                    }
+
+                    if (chart_http_code != 200)
+                    {
+                        continue;
+                    }
+
+                    double market_price = 0.0;
+                    if (!parseJsonNumberField(chart_response, "regularMarketPrice", market_price) || market_price <= 0.0)
+                    {
+                        continue;
+                    }
+
+                    double market_time_raw = static_cast<double>(std::time(nullptr));
+                    parseJsonNumberField(chart_response, "regularMarketTime", market_time_raw);
+                    const time_t market_time =
+                        (std::isfinite(market_time_raw) && market_time_raw > 0.0)
+                            ? static_cast<time_t>(std::llround(market_time_raw))
+                            : std::time(nullptr);
+
+                    std::string market_state = "UNKNOWN";
+                    if (parseJsonStringField(chart_response, "marketState", market_state))
+                    {
+                        market_state = upperCopy(trim(market_state));
+                    }
+
+                    out_quotes[symbol] = std::make_tuple(market_price, market_time, market_state);
+                    ++fallback_success_count;
+                }
+
+                if (fallback_success_count > 0)
+                {
+                    return true;
+                }
+            }
+
             error = "Yahoo quote request returned HTTP " + std::to_string(http_code);
             return false;
         }
@@ -841,6 +1020,53 @@ namespace
             }
 
             out_quotes[symbol] = std::make_tuple(price, market_time, market_state);
+        }
+
+        return true;
+    }
+
+    bool persistLiveQuoteForTicker(PortfolioManager& manager,
+                                   const std::string& portfolio_name,
+                                   const std::string& ticker,
+                                   std::string& error)
+    {
+        const std::string normalized_ticker = upperCopy(trim(ticker));
+        if (!isValidTickerSymbol(normalized_ticker))
+        {
+            error = "Invalid ticker";
+            return false;
+        }
+
+        std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+        std::string quote_error;
+        if (!fetchYahooLiveQuotes({normalized_ticker}, quotes, quote_error))
+        {
+            error = quote_error;
+            return false;
+        }
+
+        auto quote_it = quotes.find(normalized_ticker);
+        if (quote_it == quotes.end())
+        {
+            error = "No live quote returned";
+            return false;
+        }
+
+        StockData stock;
+        if (!manager.loadStockData(portfolio_name, normalized_ticker, stock))
+        {
+            error = "Stock file not found";
+            return false;
+        }
+
+        const double quote_price = std::get<0>(quote_it->second);
+        const time_t quote_as_of = std::get<1>(quote_it->second);
+
+        stock.addDailyClosePrice(quote_as_of, quote_price);
+        if (!manager.saveStockData(portfolio_name, stock))
+        {
+            error = "Failed to persist live quote";
+            return false;
         }
 
         return true;
@@ -927,6 +1153,7 @@ namespace
             case PortfolioType::BROKERAGE: return "BROKERAGE";
             case PortfolioType::ROTH_IRA: return "ROTH_IRA";
             case PortfolioType::TRADITIONAL_IRA: return "TRADITIONAL_IRA";
+            case PortfolioType::WATCHLIST: return "WATCHLIST";
         }
 
         return "UNKNOWN";
@@ -1188,11 +1415,16 @@ namespace
             return false;
         }
 
-        return type <= static_cast<uint8_t>(PortfolioType::TRADITIONAL_IRA);
+        return type <= static_cast<uint8_t>(PortfolioType::WATCHLIST);
     }
 
     double estimatePortfolioTotalValue(const Portfolio& portfolio, PortfolioManager& manager, const std::string& portfolio_name)
     {
+        if (portfolio.getType() == PortfolioType::WATCHLIST)
+        {
+            return 0.0;
+        }
+
         double total = portfolio.getAvailableCapital();
         const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
 
@@ -1322,6 +1554,8 @@ namespace
 
     std::string buildStocksJson(PortfolioManager& manager, const std::string& portfolio_name)
     {
+        Portfolio portfolio;
+        const bool has_portfolio = manager.loadPortfolio(portfolio_name, portfolio);
         std::ostringstream out;
         const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
 
@@ -1358,6 +1592,11 @@ namespace
                 latest_price_date = latest_it->date;
             }
 
+            const bool is_watchlist_portfolio = has_portfolio && portfolio.getType() == PortfolioType::WATCHLIST;
+            const double display_market_value = is_watchlist_portfolio
+                ? latest_price
+                : stock.getSharesOwned() * latest_price;
+
             out << "{"
                 << "\"ticker\":" << jsonString(stock.getTicker()) << ","
                 << "\"company_name\":" << jsonString(stock.getCompanyName()) << ","
@@ -1366,7 +1605,7 @@ namespace
                 << "\"last_updated\":" << static_cast<long long>(stock.getLastUpdated()) << ","
                 << "\"latest_close_price\":" << jsonNumber(latest_price) << ","
                 << "\"latest_close_date\":" << static_cast<long long>(latest_price_date) << ","
-                << "\"position_market_value\":" << jsonNumber(stock.getSharesOwned() * latest_price) << ","
+                << "\"position_market_value\":" << jsonNumber(display_market_value) << ","
                 << "\"event_count\":" << stock.getEvents().size() << ","
                 << "\"recent_events\":";
 
@@ -1500,7 +1739,7 @@ namespace
         out << "HTTP/1.1 " << response.status << " " << reasonPhraseForStatus(response.status) << "\r\n";
         out << "Content-Type: " << response.content_type << "\r\n";
         out << "Access-Control-Allow-Origin: *\r\n";
-        out << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
+        out << "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
         out << "Access-Control-Allow-Headers: Content-Type\r\n";
         out << "Content-Length: " << response.body.size() << "\r\n";
         out << "Connection: close\r\n\r\n";
@@ -1741,6 +1980,17 @@ namespace
             return makeJsonResponse(500, makeErrorBody("Transaction saved but market-data sync/daily value recompute failed"));
         }
 
+        // Best-effort immediate quote persistence so newly added symbols show a price without
+        // waiting for end-of-day sync.
+        {
+            std::string live_quote_error;
+            if (!persistLiveQuoteForTicker(manager, portfolio_name, normalized_ticker, live_quote_error))
+            {
+                std::cerr << "Immediate live quote persist skipped for " << normalized_ticker
+                          << ": " << live_quote_error << std::endl;
+            }
+        }
+
         std::ostringstream out;
         out << "{"
             << "\"status\":\"ok\"," 
@@ -1836,6 +2086,11 @@ namespace
                     continue;
                 }
 
+                if (portfolio.getType() == PortfolioType::WATCHLIST)
+                {
+                    continue;
+                }
+
                 double estimated_total_value = portfolio.getAvailableCapital();
                 size_t quote_count = 0;
 
@@ -1915,13 +2170,18 @@ namespace
             auto parsed_type = parsePortfolioType(raw_type.value());
             if (!parsed_type.has_value())
             {
-                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, or TRADITIONAL_IRA"));
+                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, TRADITIONAL_IRA, or WATCHLIST"));
             }
 
-            const double initial_capital = getObjectNumber(body, "initial_capital").value_or(0.0);
+            double initial_capital = getObjectNumber(body, "initial_capital").value_or(0.0);
             if (!isFiniteNonNegative(initial_capital))
             {
                 return makeJsonResponse(400, makeErrorBody("initial_capital must be >= 0"));
+            }
+
+            if (parsed_type.value() == PortfolioType::WATCHLIST)
+            {
+                initial_capital = 0.0;
             }
 
             if (manager.scanPortfolios())
@@ -2045,6 +2305,111 @@ namespace
                 return makeJsonResponse(200, out.str());
             }
 
+            if (request.method == "POST" && segments.size() == 4 && segments[3] == "watchlist")
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+
+                if (portfolio.getType() != PortfolioType::WATCHLIST)
+                {
+                    return makeJsonResponse(409, makeErrorBody("watchlist endpoint is only available for WATCHLIST portfolios"));
+                }
+
+                JsonValue body;
+                HttpResponse parse_error = parseJsonBodyObject(request, body);
+                if (parse_error.status != 200)
+                {
+                    return parse_error;
+                }
+
+                auto ticker_value = getObjectString(body, "ticker");
+                if (!ticker_value.has_value())
+                {
+                    return makeJsonResponse(400, makeErrorBody("ticker is required"));
+                }
+
+                const std::string ticker = upperCopy(trim(ticker_value.value()));
+                if (!isValidTickerSymbol(ticker))
+                {
+                    return makeJsonResponse(400, makeErrorBody("Ticker contains invalid characters or length"));
+                }
+
+                bool is_invalid_ticker = false;
+                const bool checked = maybeTickerExistsOnYahoo(ticker, is_invalid_ticker);
+                if (checked && is_invalid_ticker)
+                {
+                    return makeJsonResponse(400, makeErrorBody("Ticker was not found by market data provider"));
+                }
+
+                const std::string stock_file = manager.getStockFilePath(portfolio_name, ticker);
+                if (std::filesystem::exists(stock_file))
+                {
+                    return makeJsonResponse(200, "{\"status\":\"ok\",\"message\":\"Ticker already tracked\"}");
+                }
+
+                StockData stock;
+                stock = StockData(ticker, ticker);
+                stock.setTicker(ticker);
+                stock.setCompanyName(ticker);
+                if (!manager.saveStockData(portfolio_name, stock))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to save watchlist ticker"));
+                }
+
+                {
+                    std::string live_quote_error;
+                    if (!persistLiveQuoteForTicker(manager, portfolio_name, ticker, live_quote_error))
+                    {
+                        std::cerr << "Immediate live quote persist skipped for watchlist ticker "
+                                  << ticker << ": " << live_quote_error << std::endl;
+                    }
+                }
+
+                std::ostringstream out;
+                out << "{"
+                    << "\"status\":\"ok\"," 
+                    << "\"portfolio\":" << jsonString(portfolio_name) << ","
+                    << "\"ticker\":" << jsonString(ticker)
+                    << "}";
+                return makeJsonResponse(201, out.str());
+            }
+
+            if (request.method == "DELETE" && segments.size() == 5 && segments[3] == "watchlist")
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+
+                if (portfolio.getType() != PortfolioType::WATCHLIST)
+                {
+                    return makeJsonResponse(409, makeErrorBody("watchlist endpoint is only available for WATCHLIST portfolios"));
+                }
+
+                const std::string ticker = upperCopy(trim(percentDecode(segments[4])));
+                if (ticker.empty())
+                {
+                    return makeJsonResponse(400, makeErrorBody("ticker is required"));
+                }
+
+                if (!manager.deleteStock(portfolio_name, ticker))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Ticker was not found in watchlist"));
+                }
+
+                std::ostringstream out;
+                out << "{"
+                    << "\"status\":\"ok\"," 
+                    << "\"portfolio\":" << jsonString(portfolio_name) << ","
+                    << "\"ticker\":" << jsonString(ticker)
+                    << "}";
+                return makeJsonResponse(200, out.str());
+            }
+
             if (request.method == "GET" && segments.size() == 5 && segments[3] == "transactions" && segments[4] == "recent")
             {
                 Portfolio portfolio;
@@ -2090,6 +2455,17 @@ namespace
 
             if (request.method == "POST" && segments.size() == 5 && segments[3] == "transactions")
             {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+
+                if (portfolio.getType() == PortfolioType::WATCHLIST)
+                {
+                    return makeJsonResponse(409, makeErrorBody("Transactions are disabled for WATCHLIST portfolios"));
+                }
+
                 JsonValue body;
                 HttpResponse parse_error = parseJsonBodyObject(request, body);
                 if (parse_error.status != 200)
@@ -2328,6 +2704,7 @@ bool PortfolioApiServer::start()
         {
             PortfolioManager sync_manager(startup_sync_data_dir);
             const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+            std::lock_guard<std::mutex> lock(g_data_access_mutex);
             if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
             {
                 std::cerr << "Startup market-data sync completed with errors" << std::endl;
@@ -2350,6 +2727,7 @@ bool PortfolioApiServer::start()
 
                 PortfolioManager sync_manager(periodic_sync_data_dir);
                 const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+                std::lock_guard<std::mutex> lock(g_data_access_mutex);
                 if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
                 {
                     std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
@@ -2384,7 +2762,19 @@ bool PortfolioApiServer::start()
             }
             else
             {
-                response = routeRequest(request.value(), manager);
+                const HttpRequest& parsed_request = request.value();
+                const bool is_read_only =
+                    parsed_request.method == "GET" || parsed_request.method == "OPTIONS";
+
+                if (is_read_only)
+                {
+                    response = routeRequest(parsed_request, manager);
+                }
+                else
+                {
+                    std::lock_guard<std::mutex> lock(g_data_access_mutex);
+                    response = routeRequest(parsed_request, manager);
+                }
             }
         }
 

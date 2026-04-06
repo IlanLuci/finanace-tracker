@@ -82,7 +82,10 @@
           <article class="panel">
             <div class="panel-head">
               <h3>Stocks</h3>
-              <span id="stockCount" class="chip"></span>
+              <div class="chart-tools">
+                <span id="stockCount" class="chip"></span>
+                <button id="addWatchlistSymbolBtn" class="primary-btn" type="button" hidden>Add Symbol</button>
+              </div>
             </div>
             <div id="stocksList" class="stocks-grid"></div>
           </article>
@@ -196,10 +199,11 @@
           <option value="BROKERAGE">Brokerage</option>
           <option value="ROTH_IRA">Roth IRA</option>
           <option value="TRADITIONAL_IRA">Traditional IRA</option>
+          <option value="WATCHLIST">Watchlist</option>
         </select>
       </div>
 
-      <div class="field-row">
+      <div id="createPortfolioCapitalRow" class="field-row">
         <label for="createPortfolioCapital">Initial Capital</label>
         <input id="createPortfolioCapital" name="initialCapital" type="number" min="0" step="0.01" value="0" />
       </div>

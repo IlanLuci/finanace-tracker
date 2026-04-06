@@ -13,6 +13,9 @@ const state = {
   dashboardMarketState: "UNKNOWN",
   portfolioLastUpdated: 0,
   dashboardLastUpdated: 0,
+  activeView: "dashboard",
+  dashboardRefreshRequestSeq: 0,
+  dashboardRefreshAppliedSeq: 0,
   periods: {
     dashboard: "6M",
     portfolio: "6M"
@@ -33,6 +36,7 @@ const el = {
   portfolioType: document.getElementById("portfolioType"),
   portfolioMetrics: document.getElementById("portfolioMetrics"),
   stockCount: document.getElementById("stockCount"),
+  addWatchlistSymbolBtn: document.getElementById("addWatchlistSymbolBtn"),
   stocksList: document.getElementById("stocksList"),
   recentTransactions: document.getElementById("recentTransactions"),
   transactionsDialog: document.getElementById("transactionsDialog"),
@@ -60,6 +64,7 @@ const el = {
   createPortfolioForm: document.getElementById("createPortfolioForm"),
   createPortfolioName: document.getElementById("createPortfolioName"),
   createPortfolioType: document.getElementById("createPortfolioType"),
+  createPortfolioCapitalRow: document.getElementById("createPortfolioCapitalRow"),
   createPortfolioCapital: document.getElementById("createPortfolioCapital"),
   createPortfolioSubmitBtn: document.getElementById("createPortfolioSubmitBtn"),
   backToDashBtn: document.getElementById("backToDashBtn"),
@@ -243,6 +248,7 @@ function setDashboardLastUpdatedChip(unixSeconds) {
 
 function setActiveView(view) {
   const showDashboardView = view === "dashboard";
+  state.activeView = showDashboardView ? "dashboard" : "portfolio";
 
   el.dashboardView.classList.toggle("is-active", showDashboardView);
   el.portfolioView.classList.toggle("is-active", !showDashboardView);
@@ -274,6 +280,19 @@ async function apiPost(path, body) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed: ${response.status}`);
+  }
+
+  return data;
+}
+
+async function apiDelete(path) {
+  const response = await fetch(apiUrl(path), {
+    method: "DELETE"
   });
 
   const data = await response.json();
@@ -507,6 +526,10 @@ function stockToneClass(totalChange, hasBasis, isZeroCostBasisPosition = false) 
   return "stock-card-neutral";
 }
 
+function isWatchlistPortfolio(portfolio) {
+  return String(portfolio?.type || "").toUpperCase() === "WATCHLIST";
+}
+
 function periodSelectMarkup(selectId, selectedPeriod) {
   const options = PERIOD_OPTIONS
     .map((period) => `<option value="${period}"${period === selectedPeriod ? " selected" : ""}>${period}</option>`)
@@ -722,17 +745,19 @@ function renderDashboard() {
   const portfolios = normalizePortfolios(state.portfolios);
   state.portfolios = portfolios;
 
-  const totalAssets = portfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
-  const totalCash = portfolios.reduce((sum, p) => sum + (p.available_capital || 0), 0);
-  const totalStocks = portfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
-  const totalTransactions = portfolios.reduce((sum, p) => sum + (p.transaction_count || 0), 0);
-  const aggregateTrend = mergeDailySeries(portfolios);
+  const accountPortfolios = portfolios.filter((p) => !isWatchlistPortfolio(p));
+
+  const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  const totalCash = accountPortfolios.reduce((sum, p) => sum + (p.available_capital || 0), 0);
+  const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
+  const totalTransactions = accountPortfolios.reduce((sum, p) => sum + (p.transaction_count || 0), 0);
+  const aggregateTrend = mergeDailySeries(accountPortfolios);
 
   const dashboardMetrics = `<section class="metric-grid">
-    ${metricCard("Total Assets", currency(totalAssets), `${portfolios.length} portfolio${portfolios.length === 1 ? "" : "s"}`)}
-    ${metricCard("Total Available Cash", currency(totalCash), "Across all accounts")}
-    ${metricCard("Total Stock Positions", String(totalStocks), "Unique position records")}
-    ${metricCard("Total Transactions", String(totalTransactions), "Combined history")}
+    ${metricCard("Total Assets", currency(totalAssets), `${accountPortfolios.length} account portfolio${accountPortfolios.length === 1 ? "" : "s"}`)}
+    ${metricCard("Total Available Cash", currency(totalCash), "Across account portfolios")}
+    ${metricCard("Total Stock Positions", String(totalStocks), "Account positions only")}
+    ${metricCard("Total Transactions", String(totalTransactions), "Account transaction history")}
   </section>`;
 
   const cards = portfolios
@@ -742,9 +767,12 @@ function renderDashboard() {
           <strong>${portfolioDisplayName(p.name)}</strong>
           <span class="chip">${typeLabel(p.type)}</span>
         </div>
-        <div>${currency(p.estimated_total_value)}</div>
-        <div class="sub">Cash: ${currency(p.available_capital)}</div>
-        <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>
+        ${isWatchlistPortfolio(p)
+          ? `<div class="sub">Watchlist only</div>
+             <div class="sub">${p.stock_count} symbols tracked</div>`
+          : `<div>${currency(p.estimated_total_value)}</div>
+             <div class="sub">Cash: ${currency(p.available_capital)}</div>
+             <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>`}
       </article>`
     )
     .join("");
@@ -886,17 +914,33 @@ function renderAllocationChart(stocks, portfolio) {
 }
 
 function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
+  const watchlist = isWatchlistPortfolio(portfolio);
+
   el.portfolioName.textContent = portfolioDisplayName(portfolio.name);
   el.portfolioType.textContent = typeLabel(portfolio.type);
-  el.stockCount.textContent = `${stocks.length} stock${stocks.length === 1 ? "" : "s"}`;
+  el.stockCount.textContent = watchlist
+    ? `${stocks.length} symbol${stocks.length === 1 ? "" : "s"}`
+    : `${stocks.length} stock${stocks.length === 1 ? "" : "s"}`;
 
-  const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
-  el.portfolioMetrics.innerHTML = [
-    metricCard("Estimated Total", currency(portfolio.estimated_total_value)),
-    metricCard("Available Capital", currency(portfolio.available_capital)),
-    metricCard("Reported Total", currency(portfolio.reported_total_value)),
-    metricCard("Position Value", currency(valueDelta), `${portfolio.transaction_count} transactions`)
-  ].join("");
+  el.addWatchlistSymbolBtn.hidden = !watchlist;
+  el.addWatchlistSymbolBtn.onclick = watchlist ? () => addWatchlistSymbol() : null;
+
+  if (watchlist) {
+    el.portfolioMetrics.innerHTML = [
+      metricCard("Tracked Symbols", String(stocks.length), "No transaction ledger"),
+      metricCard("Transactions", "Disabled", "Watchlist mode"),
+      metricCard("Account Totals", "Excluded", "Not included in portfolio totals"),
+      metricCard("Initial Capital", "Not Applicable", "Watchlists do not hold cash")
+    ].join("");
+  } else {
+    const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
+    el.portfolioMetrics.innerHTML = [
+      metricCard("Estimated Total", currency(portfolio.estimated_total_value)),
+      metricCard("Available Capital", currency(portfolio.available_capital)),
+      metricCard("Reported Total", currency(portfolio.reported_total_value)),
+      metricCard("Position Value", currency(valueDelta), `${portfolio.transaction_count} transactions`)
+    ].join("");
+  }
 
   const sortedStocks = [...stocks].sort((a, b) => (b.position_market_value || 0) - (a.position_market_value || 0));
   el.stocksList.innerHTML = sortedStocks
@@ -908,6 +952,23 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
           performance.hasBasis,
           performance.isZeroCostBasisPosition
         );
+
+        if (watchlist) {
+          const latestTs = safeNumber(stock.latest_close_date);
+          return `<article class="stock-card stock-card-neutral fade-up" data-ticker="${stock.ticker}">
+        <div class="stock-top">
+          <strong>${stock.ticker}</strong>
+          <span class="stock-market-value">${currency(stock.latest_close_price)}</span>
+        </div>
+        <div class="stock-name">${stock.company_name || "Watchlist symbol"}</div>
+        <div class="stock-stats">
+          <span>Latest Price: ${currency(stock.latest_close_price)}</span>
+          <span>As Of: ${latestTs ? dateLabel(latestTs) : "n/a"}</span>
+          <span>Click for actions</span>
+        </div>
+      </article>`;
+        }
+
         const perShareLabel = `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`;
         const totalLabel = `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`;
 
@@ -939,7 +1000,15 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     });
   });
 
-  el.recentTransactions.innerHTML = renderTransactionTable(recentTransactions);
+  if (watchlist) {
+    el.openTransactionDialogBtn.hidden = true;
+    el.viewAllTransactionsBtn.hidden = true;
+    el.recentTransactions.innerHTML = "<p>Transactions are disabled for watchlist portfolios.</p>";
+  } else {
+    el.openTransactionDialogBtn.hidden = false;
+    el.viewAllTransactionsBtn.hidden = false;
+    el.recentTransactions.innerHTML = renderTransactionTable(recentTransactions);
+  }
 
   el.portfolioPeriodSelect.value = state.periods.portfolio;
   el.portfolioPeriodSelect.onchange = (event) => {
@@ -947,8 +1016,63 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     renderPortfolioChart();
   };
 
-  renderPortfolioChart();
-  renderAllocationChart(stocks, portfolio);
+  const allocationPanel = el.portfolioAllocationChart?.closest(".allocation-panel");
+  const chartPanel = el.portfolioChart?.closest(".chart-panel");
+  if (allocationPanel) {
+    allocationPanel.hidden = watchlist;
+  }
+  if (chartPanel) {
+    chartPanel.hidden = watchlist;
+  }
+
+  if (!watchlist) {
+    renderPortfolioChart();
+    renderAllocationChart(stocks, portfolio);
+  }
+}
+
+async function addWatchlistSymbol() {
+  if (!state.currentPortfolio || !isWatchlistPortfolio(state.currentPortfolio)) {
+    return;
+  }
+
+  const rawTicker = window.prompt("Add ticker to watchlist (example: AAPL)", "");
+  if (!rawTicker) {
+    return;
+  }
+
+  const ticker = String(rawTicker).trim().toUpperCase();
+  if (!ticker) {
+    return;
+  }
+
+  try {
+    await apiPost(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/watchlist`, { ticker });
+    await openPortfolio(state.currentPortfolio.name);
+    showFlash(`Added ${ticker} to watchlist.`);
+  } catch (error) {
+    showFlash(error.message);
+  }
+}
+
+async function removeWatchlistSymbol(ticker) {
+  if (!state.currentPortfolio || !isWatchlistPortfolio(state.currentPortfolio)) {
+    return;
+  }
+
+  const confirmed = window.confirm(`Remove ${ticker} from watchlist?`);
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await apiDelete(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/watchlist/${encodeURIComponent(ticker)}`);
+    el.stockDialog.close();
+    await openPortfolio(state.currentPortfolio.name);
+    showFlash(`Removed ${ticker} from watchlist.`);
+  } catch (error) {
+    showFlash(error.message);
+  }
 }
 
 function priceMapFromPayload(payload) {
@@ -1088,12 +1212,21 @@ function stopDashboardLiveRefreshTimer() {
 }
 
 async function refreshDashboardWithLivePrices() {
-  if (el.dashboardView.hidden) {
+  if (el.dashboardView.hidden || state.activeView !== "dashboard") {
     return;
   }
 
+  const requestSeq = ++state.dashboardRefreshRequestSeq;
+
   try {
     const payload = await apiGet("/api/live-prices");
+    if (requestSeq < state.dashboardRefreshAppliedSeq) {
+      return;
+    }
+    if (el.dashboardView.hidden || state.activeView !== "dashboard") {
+      return;
+    }
+
     const marketState = resolveMarketState(payload);
     setDashboardMarketStateChip(marketState);
 
@@ -1110,7 +1243,7 @@ async function refreshDashboardWithLivePrices() {
     rows.forEach((row) => {
       const name = String(row?.name || "").trim();
       const estimatedTotalValue = safeNumber(row?.estimated_total_value);
-      if (!name || estimatedTotalValue <= 0) {
+      if (!name || !Number.isFinite(estimatedTotalValue)) {
         return;
       }
       liveByName.set(name, estimatedTotalValue);
@@ -1124,7 +1257,7 @@ async function refreshDashboardWithLivePrices() {
     const todayBucket = Math.floor(nowTs / 86400);
     state.portfolios = state.portfolios.map((portfolio) => {
       const liveEstimate = liveByName.get(portfolio?.name);
-      if (!Number.isFinite(liveEstimate) || liveEstimate <= 0) {
+      if (!Number.isFinite(liveEstimate)) {
         return portfolio;
       }
 
@@ -1152,7 +1285,11 @@ async function refreshDashboardWithLivePrices() {
     renderDashboard();
     setActiveView("dashboard");
     setBreadcrumbs([{ label: "Dashboard" }]);
+    state.dashboardRefreshAppliedSeq = requestSeq;
   } catch (_) {
+    if (el.dashboardView.hidden || state.activeView !== "dashboard") {
+      return;
+    }
     setDashboardMarketStateChip(fallbackMarketStateNowET());
     setDashboardLastUpdatedChip(0);
   }
@@ -1183,6 +1320,34 @@ function startLiveRefreshTimer(portfolioName) {
 }
 
 function showStockDialog(stock) {
+  const watchlist = isWatchlistPortfolio(state.currentPortfolio);
+
+  if (watchlist) {
+    el.stockDialogTitle.textContent = `${stock.ticker} • ${stock.company_name || "Watchlist Symbol"}`;
+    el.stockDialogBody.innerHTML = `
+      <article class="panel stock-dialog-summary stock-card-neutral">
+        <div class="panel-head">
+          <h3>Watchlist Snapshot</h3>
+          <button id="removeWatchlistSymbolBtn" class="ghost-btn" type="button">Remove Symbol</button>
+        </div>
+        <div class="stock-dialog-grid">
+          <div><span>Latest Price</span><strong>${currency(stock.latest_close_price)}</strong></div>
+          <div><span>As Of</span><strong>${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</strong></div>
+          <div><span>Ticker</span><strong>${stock.ticker}</strong></div>
+          <div><span>Mode</span><strong>Watchlist</strong></div>
+        </div>
+      </article>
+    `;
+
+    const removeBtn = document.getElementById("removeWatchlistSymbolBtn");
+    if (removeBtn) {
+      removeBtn.addEventListener("click", () => removeWatchlistSymbol(stock.ticker));
+    }
+
+    el.stockDialog.showModal();
+    return;
+  }
+
   const performance = stockPerformance(stock);
   const toneClass = stockToneClass(
     performance.totalChange,
@@ -1265,6 +1430,10 @@ async function openPortfolio(name) {
     return true;
   } catch (error) {
     showFlash(error.message);
+    if (state.activeView === "dashboard") {
+      startDashboardLiveRefreshTimer();
+      refreshDashboardWithLivePrices();
+    }
     return false;
   }
 }
@@ -1340,6 +1509,13 @@ function resetCreatePortfolioForm() {
   el.createPortfolioForm.reset();
   el.createPortfolioType.value = "BROKERAGE";
   el.createPortfolioCapital.value = "0";
+  updateCreatePortfolioFormForType();
+}
+
+function updateCreatePortfolioFormForType() {
+  const watchlist = el.createPortfolioType.value === "WATCHLIST";
+  el.createPortfolioCapitalRow.hidden = watchlist;
+  el.createPortfolioCapital.disabled = watchlist;
 }
 
 function openCreatePortfolioDialog() {
@@ -1353,6 +1529,11 @@ function openTransactionDialog() {
     return;
   }
 
+  if (isWatchlistPortfolio(state.currentPortfolio)) {
+    showFlash("Transactions are disabled for watchlist portfolios.");
+    return;
+  }
+
   resetTransactionForm();
   el.transactionDialog.showModal();
 }
@@ -1361,6 +1542,11 @@ async function submitTransactionForm(event) {
   event.preventDefault();
   if (!state.currentPortfolio) {
     showFlash("Select a portfolio first.");
+    return;
+  }
+
+  if (isWatchlistPortfolio(state.currentPortfolio)) {
+    showFlash("Transactions are disabled for watchlist portfolios.");
     return;
   }
 
@@ -1416,6 +1602,11 @@ async function showAllTransactions() {
     return;
   }
 
+  if (isWatchlistPortfolio(state.currentPortfolio)) {
+    showFlash("Transactions are disabled for watchlist portfolios.");
+    return;
+  }
+
   try {
     const payload = await apiGet(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions`);
     el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [])}</div>`;
@@ -1430,6 +1621,7 @@ async function submitCreatePortfolioForm(event) {
 
   const name = el.createPortfolioName.value.trim();
   const type = el.createPortfolioType.value;
+  const isWatchlist = type === "WATCHLIST";
   const initialCapital = safeNumber(el.createPortfolioCapital.value);
 
   if (!name) {
@@ -1437,7 +1629,7 @@ async function submitCreatePortfolioForm(event) {
     return;
   }
 
-  if (initialCapital < 0) {
+  if (!isWatchlist && initialCapital < 0) {
     showFlash("Initial capital must be non-negative.");
     return;
   }
@@ -1445,11 +1637,15 @@ async function submitCreatePortfolioForm(event) {
   try {
     el.createPortfolioSubmitBtn.disabled = true;
 
-    const created = await apiPost("/api/portfolios", {
+    const body = {
       name,
-      type,
-      initial_capital: initialCapital
-    });
+      type
+    };
+    if (!isWatchlist) {
+      body.initial_capital = initialCapital;
+    }
+
+    const created = await apiPost("/api/portfolios", body);
 
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
@@ -1523,6 +1719,7 @@ function wireEvents() {
   el.transactionType.addEventListener("change", updateTransactionFormVisibility);
   el.transactionForm.addEventListener("submit", submitTransactionForm);
   el.createPortfolioForm.addEventListener("submit", submitCreatePortfolioForm);
+  el.createPortfolioType.addEventListener("change", updateCreatePortfolioFormForType);
 
   el.apiConfigToggle.addEventListener("click", toggleApiPanel);
   el.apiConfigForm.addEventListener("submit", saveApiBase);
