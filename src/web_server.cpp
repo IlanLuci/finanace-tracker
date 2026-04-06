@@ -687,6 +687,165 @@ namespace
         return true;
     }
 
+    bool fetchYahooLiveQuotes(const std::vector<std::string>& symbols,
+                              std::map<std::string, std::tuple<double, time_t, std::string>>& out_quotes,
+                              std::string& error)
+    {
+        out_quotes.clear();
+        if (symbols.empty())
+        {
+            return true;
+        }
+
+        std::ostringstream symbols_param;
+        for (size_t i = 0; i < symbols.size(); ++i)
+        {
+            if (i > 0)
+            {
+                symbols_param << ',';
+            }
+            symbols_param << upperCopy(trim(symbols[i]));
+        }
+
+        const std::string url =
+            "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + symbols_param.str();
+
+        const std::string command =
+            "curl -sS --compressed -w '\\n%{http_code}' --connect-timeout 8 --max-time 20 "
+            "-H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' "
+            "-H 'Accept: application/json' "
+            "'" + shellEscapeSingleQuoted(url) + "'";
+
+        std::array<char, 4096> buffer = {};
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe == nullptr)
+        {
+            error = "Failed to execute quote lookup";
+            return false;
+        }
+
+        std::string response;
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        {
+            response += buffer.data();
+        }
+
+        const int status = pclose(pipe);
+        if (status != 0)
+        {
+            error = "Quote request failed";
+            return false;
+        }
+
+        const size_t last_newline = response.rfind('\n');
+        if (last_newline == std::string::npos || last_newline + 1 >= response.size())
+        {
+            error = "Malformed quote response";
+            return false;
+        }
+
+        std::string http_status_str = response.substr(last_newline + 1);
+        const size_t end = http_status_str.find_last_not_of(" \n\r\t");
+        if (end == std::string::npos)
+        {
+            error = "Quote response did not include status";
+            return false;
+        }
+        http_status_str.erase(end + 1);
+        response = response.substr(0, last_newline);
+
+        int http_code = 0;
+        try
+        {
+            http_code = std::stoi(http_status_str);
+        }
+        catch (const std::exception&)
+        {
+            error = "Failed to parse quote HTTP status";
+            return false;
+        }
+
+        if (http_code != 200)
+        {
+            error = "Yahoo quote request returned HTTP " + std::to_string(http_code);
+            return false;
+        }
+
+        JsonParser parser(response);
+        auto root = parser.parseRoot();
+        if (!root.has_value() || root->type != JsonType::OBJECT)
+        {
+            error = "Malformed Yahoo quote JSON";
+            return false;
+        }
+
+        auto quote_response_it = root->object_value.find("quoteResponse");
+        if (quote_response_it == root->object_value.end() || quote_response_it->second.type != JsonType::OBJECT)
+        {
+            error = "Yahoo quote payload missing quoteResponse";
+            return false;
+        }
+
+        auto result_it = quote_response_it->second.object_value.find("result");
+        if (result_it == quote_response_it->second.object_value.end() || result_it->second.type != JsonType::ARRAY)
+        {
+            error = "Yahoo quote payload missing result array";
+            return false;
+        }
+
+        for (const JsonValue& entry : result_it->second.array_value)
+        {
+            if (entry.type != JsonType::OBJECT)
+            {
+                continue;
+            }
+
+            auto symbol_it = entry.object_value.find("symbol");
+            auto price_it = entry.object_value.find("regularMarketPrice");
+            if (symbol_it == entry.object_value.end() || price_it == entry.object_value.end())
+            {
+                continue;
+            }
+            if (symbol_it->second.type != JsonType::STRING || price_it->second.type != JsonType::NUMBER)
+            {
+                continue;
+            }
+
+            const std::string symbol = upperCopy(trim(symbol_it->second.string_value));
+            const double price = price_it->second.number_value;
+            if (symbol.empty() || !std::isfinite(price) || price <= 0.0)
+            {
+                continue;
+            }
+
+            std::string market_state = "UNKNOWN";
+            auto market_state_it = entry.object_value.find("marketState");
+            if (market_state_it != entry.object_value.end() && market_state_it->second.type == JsonType::STRING)
+            {
+                market_state = upperCopy(trim(market_state_it->second.string_value));
+                if (market_state.empty())
+                {
+                    market_state = "UNKNOWN";
+                }
+            }
+
+            time_t market_time = std::time(nullptr);
+            auto market_time_it = entry.object_value.find("regularMarketTime");
+            if (market_time_it != entry.object_value.end() && market_time_it->second.type == JsonType::NUMBER)
+            {
+                const double parsed_time = market_time_it->second.number_value;
+                if (std::isfinite(parsed_time) && parsed_time > 0.0)
+                {
+                    market_time = static_cast<time_t>(std::llround(parsed_time));
+                }
+            }
+
+            out_quotes[symbol] = std::make_tuple(price, market_time, market_state);
+        }
+
+        return true;
+    }
+
     std::string jsonEscape(const std::string& value)
     {
         std::ostringstream out;
@@ -1615,6 +1774,122 @@ namespace
             return makeJsonResponse(200, buildPortfolioSummaryJson(manager));
         }
 
+        if (request.method == "GET" && request.path == "/api/live-prices")
+        {
+            if (!manager.scanPortfolios())
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to scan portfolios"));
+            }
+
+            const std::vector<std::string> portfolio_names = manager.getPortfolioNames();
+            std::map<std::string, bool> unique_tickers;
+            for (const std::string& name : portfolio_names)
+            {
+                for (const std::string& ticker : manager.listStocks(name))
+                {
+                    unique_tickers[upperCopy(trim(ticker))] = true;
+                }
+            }
+
+            std::vector<std::string> tickers;
+            tickers.reserve(unique_tickers.size());
+            for (const auto& entry : unique_tickers)
+            {
+                tickers.push_back(entry.first);
+            }
+
+            std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+            std::string quote_error;
+            if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
+            {
+                return makeJsonResponse(502, makeErrorBody("Failed to fetch live prices: " + quote_error));
+            }
+
+            std::string aggregate_market_state = "CLOSED";
+            for (const auto& quote_entry : quotes)
+            {
+                const std::string quote_state = std::get<2>(quote_entry.second);
+                if (quote_state == "REGULAR")
+                {
+                    aggregate_market_state = "REGULAR";
+                    break;
+                }
+
+                if (aggregate_market_state != "REGULAR" &&
+                    (quote_state == "PRE" || quote_state == "PREPRE" || quote_state == "POST"))
+                {
+                    aggregate_market_state = quote_state;
+                }
+            }
+
+            std::ostringstream out;
+            out << "{"
+                << "\"market_state\":" << jsonString(aggregate_market_state) << ","
+                << "\"portfolios\":[";
+
+            bool first_portfolio = true;
+            for (const std::string& name : portfolio_names)
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(name, portfolio))
+                {
+                    continue;
+                }
+
+                double estimated_total_value = portfolio.getAvailableCapital();
+                size_t quote_count = 0;
+
+                for (const std::string& ticker : manager.listStocks(name))
+                {
+                    StockData stock;
+                    if (!manager.loadStockData(name, ticker, stock))
+                    {
+                        continue;
+                    }
+
+                    const std::string normalized_ticker = upperCopy(trim(ticker));
+                    auto quote_it = quotes.find(normalized_ticker);
+                    if (quote_it != quotes.end())
+                    {
+                        estimated_total_value += stock.getSharesOwned() * std::get<0>(quote_it->second);
+                        ++quote_count;
+                        continue;
+                    }
+
+                    const auto& history = stock.getPriceHistory();
+                    if (history.empty())
+                    {
+                        continue;
+                    }
+
+                    auto latest_it = std::max_element(
+                        history.begin(),
+                        history.end(),
+                        [](const DailyStockPrice& lhs, const DailyStockPrice& rhs)
+                        {
+                            return lhs.date < rhs.date;
+                        }
+                    );
+                    estimated_total_value += stock.getSharesOwned() * latest_it->close_price;
+                }
+
+                if (!first_portfolio)
+                {
+                    out << ",";
+                }
+                first_portfolio = false;
+
+                out << "{"
+                    << "\"name\":" << jsonString(name) << ","
+                    << "\"estimated_total_value\":" << jsonNumber(estimated_total_value) << ","
+                    << "\"quote_count\":" << quote_count
+                    << "}";
+            }
+
+            out << "]}";
+            return makeJsonResponse(200, out.str());
+        }
+
         if (request.method == "POST" && request.path == "/api/portfolios")
         {
             JsonValue body;
@@ -1701,6 +1976,73 @@ namespace
                     return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
                 }
                 return makeJsonResponse(200, buildStocksJson(manager, portfolio_name));
+            }
+
+            if (request.method == "GET" && segments.size() == 4 && segments[3] == "live-prices")
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+
+                const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+                std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+                std::string quote_error;
+                if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
+                {
+                    return makeJsonResponse(502, makeErrorBody("Failed to fetch live prices: " + quote_error));
+                }
+
+                std::string aggregate_market_state = "CLOSED";
+
+                std::ostringstream out;
+                out << "{"
+                    << "\"portfolio\":" << jsonString(portfolio_name) << ","
+                    << "\"prices\":[";
+
+                bool first = true;
+                for (const auto& ticker : tickers)
+                {
+                    const std::string normalized = upperCopy(trim(ticker));
+                    auto quote_it = quotes.find(normalized);
+                    if (quote_it == quotes.end())
+                    {
+                        continue;
+                    }
+
+                    if (!first)
+                    {
+                        out << ",";
+                    }
+                    first = false;
+
+                    const double quote_price = std::get<0>(quote_it->second);
+                    const time_t quote_as_of = std::get<1>(quote_it->second);
+                    const std::string quote_state = std::get<2>(quote_it->second);
+
+                    if (quote_state == "REGULAR")
+                    {
+                        aggregate_market_state = "REGULAR";
+                    }
+                    else if (aggregate_market_state != "REGULAR" &&
+                             (quote_state == "PRE" || quote_state == "PREPRE" || quote_state == "POST"))
+                    {
+                        aggregate_market_state = quote_state;
+                    }
+
+                    out << "{"
+                        << "\"ticker\":" << jsonString(normalized) << ","
+                        << "\"price\":" << jsonNumber(quote_price) << ","
+                        << "\"as_of\":" << static_cast<long long>(quote_as_of) << ","
+                        << "\"market_state\":" << jsonString(quote_state)
+                        << "}";
+                }
+
+                out << "],"
+                    << "\"market_state\":" << jsonString(aggregate_market_state)
+                    << "}";
+                return makeJsonResponse(200, out.str());
             }
 
             if (request.method == "GET" && segments.size() == 5 && segments[3] == "transactions" && segments[4] == "recent")

@@ -7,6 +7,12 @@ const state = {
   currentPortfolio: null,
   currentStocks: [],
   recentTransactions: [],
+  liveRefreshTimer: null,
+  dashboardLiveRefreshTimer: null,
+  liveMarketState: "UNKNOWN",
+  dashboardMarketState: "UNKNOWN",
+  portfolioLastUpdated: 0,
+  dashboardLastUpdated: 0,
   periods: {
     dashboard: "6M",
     portfolio: "6M"
@@ -64,6 +70,8 @@ const el = {
   apiResetBtn: document.getElementById("apiResetBtn"),
   apiStatus: document.getElementById("apiStatus"),
   portfolioPeriodSelect: document.getElementById("portfolioPeriodSelect"),
+  marketStateChip: document.getElementById("marketStateChip"),
+  portfolioLastUpdatedChip: document.getElementById("portfolioLastUpdatedChip"),
   portfolioChangeChip: document.getElementById("portfolioChangeChip"),
   portfolioChart: document.getElementById("portfolioChart"),
   portfolioAllocationChart: document.getElementById("portfolioAllocationChart"),
@@ -72,6 +80,166 @@ const el = {
 };
 
 const PERIOD_OPTIONS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
+
+const LIVE_REFRESH_INTERVAL_MS = 15000;
+
+function unixNow() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function fallbackMarketStateNowET() {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const partValue = (type) => parts.find((part) => part.type === type)?.value || "";
+  const weekday = partValue("weekday");
+  const hour = safeNumber(partValue("hour"));
+  const minute = safeNumber(partValue("minute"));
+
+  const isWeekday = weekday === "Mon" || weekday === "Tue" || weekday === "Wed" || weekday === "Thu" || weekday === "Fri";
+  if (!isWeekday) {
+    return "CLOSED";
+  }
+
+  const totalMinutes = hour * 60 + minute;
+  if (totalMinutes < 4 * 60 || totalMinutes >= 20 * 60) {
+    return "CLOSED";
+  }
+
+  if (totalMinutes < 9 * 60 + 30) {
+    return "PRE";
+  }
+
+  if (totalMinutes < 16 * 60) {
+    return "REGULAR";
+  }
+
+  return "POST";
+}
+
+function resolveMarketState(payload) {
+  const topLevel = String(payload?.market_state || "").trim().toUpperCase();
+  if (topLevel) {
+    return topLevel;
+  }
+
+  const entries = Array.isArray(payload?.prices) ? payload.prices : [];
+  for (const entry of entries) {
+    const candidate = String(entry?.market_state || "").trim().toUpperCase();
+    if (candidate === "REGULAR") {
+      return candidate;
+    }
+  }
+  for (const entry of entries) {
+    const candidate = String(entry?.market_state || "").trim().toUpperCase();
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return fallbackMarketStateNowET();
+}
+
+function latestAsOfFromPayload(payload) {
+  const entries = Array.isArray(payload?.prices) ? payload.prices : [];
+  let maxAsOf = 0;
+  entries.forEach((entry) => {
+    maxAsOf = Math.max(maxAsOf, safeNumber(entry?.as_of));
+  });
+  return maxAsOf > 0 ? maxAsOf : 0;
+}
+
+function formatUpdatedLabel(unixSeconds) {
+  if (!unixSeconds || unixSeconds <= 0) {
+    return "Updated: n/a";
+  }
+
+  const formatted = new Date(unixSeconds * 1000).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  return `Updated: ${formatted}`;
+}
+
+function setMarketStateChip(marketState) {
+  const normalized = String(marketState || "UNKNOWN").toUpperCase();
+  state.liveMarketState = normalized;
+
+  if (!el.marketStateChip) {
+    return;
+  }
+
+  const toneClass = normalized === "REGULAR"
+    ? "chip-positive"
+    : normalized === "PRE" || normalized === "POST" || normalized === "PREPRE"
+      ? "chip-neutral"
+      : "chip-negative";
+
+  el.marketStateChip.className = `chip ${toneClass}`;
+  el.marketStateChip.textContent = `Market: ${typeLabel(normalized)}`;
+}
+
+function setDashboardMarketStateChip(marketState) {
+  const normalized = String(marketState || "UNKNOWN").toUpperCase();
+  state.dashboardMarketState = normalized;
+
+  const chip = document.getElementById("dashboardMarketStateChip");
+  if (!chip) {
+    return;
+  }
+
+  const toneClass = normalized === "REGULAR"
+    ? "chip-positive"
+    : normalized === "PRE" || normalized === "POST" || normalized === "PREPRE"
+      ? "chip-neutral"
+      : "chip-negative";
+
+  chip.className = `chip ${toneClass}`;
+  chip.textContent = `Market: ${typeLabel(normalized)}`;
+}
+
+function setPortfolioLastUpdatedChip(unixSeconds) {
+  state.portfolioLastUpdated = safeNumber(unixSeconds);
+  if (!el.portfolioLastUpdatedChip) {
+    return;
+  }
+
+  if (state.portfolioLastUpdated <= 0) {
+    el.portfolioLastUpdatedChip.hidden = true;
+    return;
+  }
+
+  el.portfolioLastUpdatedChip.hidden = false;
+
+  el.portfolioLastUpdatedChip.className = "chip chip-neutral";
+  el.portfolioLastUpdatedChip.textContent = formatUpdatedLabel(state.portfolioLastUpdated);
+}
+
+function setDashboardLastUpdatedChip(unixSeconds) {
+  state.dashboardLastUpdated = safeNumber(unixSeconds);
+
+  const chip = document.getElementById("dashboardLastUpdatedChip");
+  if (!chip) {
+    return;
+  }
+
+  if (state.dashboardLastUpdated <= 0) {
+    chip.hidden = true;
+    return;
+  }
+
+  chip.hidden = false;
+
+  chip.className = "chip chip-neutral";
+  chip.textContent = formatUpdatedLabel(state.dashboardLastUpdated);
+}
 
 function setActiveView(view) {
   const showDashboardView = view === "dashboard";
@@ -596,6 +764,8 @@ function renderDashboard() {
         <h3>Total Asset Trend</h3>
         <div class="chart-tools">
           ${periodSelectMarkup("dashboardPeriodSelect", state.periods.dashboard)}
+          <span id="dashboardMarketStateChip" class="chip chip-neutral">Market: n/a</span>
+          <span id="dashboardLastUpdatedChip" class="chip chip-neutral">Updated: n/a</span>
           <span id="dashboardChangeChip" class="chip chip-neutral">Change: n/a</span>
         </div>
       </div>
@@ -648,6 +818,8 @@ function renderDashboard() {
 
   try {
     drawDashboardChart();
+    setDashboardMarketStateChip(state.dashboardMarketState);
+    setDashboardLastUpdatedChip(state.dashboardLastUpdated);
   } catch (error) {
     showFlash(`Dashboard chart could not render: ${error.message}`);
   }
@@ -779,6 +951,237 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   renderAllocationChart(stocks, portfolio);
 }
 
+function priceMapFromPayload(payload) {
+  const byTicker = new Map();
+  const entries = Array.isArray(payload?.prices) ? payload.prices : [];
+  entries.forEach((entry) => {
+    const ticker = String(entry?.ticker || "").trim().toUpperCase();
+    const price = safeNumber(entry?.price);
+    const asOf = safeNumber(entry?.as_of);
+    if (!ticker || price <= 0) {
+      return;
+    }
+
+    byTicker.set(ticker, {
+      price,
+      asOf: asOf > 0 ? asOf : unixNow()
+    });
+  });
+  return byTicker;
+}
+
+function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
+  const nowTs = unixNow();
+  const updatedStocks = (Array.isArray(stocks) ? stocks : []).map((stock) => {
+    const ticker = String(stock?.ticker || "").trim().toUpperCase();
+    const live = livePriceMap.get(ticker);
+    if (!live) {
+      return { ...stock };
+    }
+
+    const shares = safeNumber(stock?.shares_owned);
+    const livePositionValue = shares * live.price;
+    return {
+      ...stock,
+      latest_close_price: live.price,
+      latest_close_date: live.asOf,
+      position_market_value: livePositionValue
+    };
+  });
+
+  const totalPositionValue = updatedStocks.reduce(
+    (sum, stock) => sum + safeNumber(stock?.position_market_value),
+    0
+  );
+
+  const updatedPortfolio = {
+    ...portfolio,
+    estimated_total_value: safeNumber(portfolio?.available_capital) + totalPositionValue,
+    daily_values: Array.isArray(portfolio?.daily_values) ? [...portfolio.daily_values] : []
+  };
+
+  const todayBucket = Math.floor(nowTs / 86400);
+  const existingIndex = updatedPortfolio.daily_values.findIndex(
+    (point) => Math.floor(safeNumber(point?.date) / 86400) === todayBucket
+  );
+  const livePoint = {
+    date: nowTs,
+    value: updatedPortfolio.estimated_total_value,
+    last_updated: nowTs
+  };
+
+  if (existingIndex >= 0) {
+    updatedPortfolio.daily_values[existingIndex] = livePoint;
+  } else {
+    updatedPortfolio.daily_values.push(livePoint);
+  }
+
+  return {
+    portfolio: updatedPortfolio,
+    stocks: updatedStocks
+  };
+}
+
+async function refreshPortfolioWithLivePrices(portfolioName) {
+  if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
+    return;
+  }
+
+  try {
+    const payload = await apiGet(`/api/portfolios/${encodeURIComponent(portfolioName)}/live-prices`);
+    if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
+      return;
+    }
+
+    const marketState = resolveMarketState(payload);
+    setMarketStateChip(marketState);
+
+    if (marketState !== "REGULAR") {
+      setPortfolioLastUpdatedChip(0);
+      return;
+    }
+
+    const latestAsOf = latestAsOfFromPayload(payload);
+    setPortfolioLastUpdatedChip(latestAsOf);
+
+    const livePriceMap = priceMapFromPayload(payload);
+    if (!livePriceMap.size) {
+      return;
+    }
+
+    const updated = applyLivePricesToPortfolio(state.currentPortfolio, state.currentStocks, livePriceMap);
+    state.currentPortfolio = updated.portfolio;
+    state.currentStocks = updated.stocks;
+
+    state.portfolios = state.portfolios.map((portfolio) => {
+      if (portfolio?.name !== portfolioName) {
+        return portfolio;
+      }
+
+      return {
+        ...portfolio,
+        estimated_total_value: updated.portfolio.estimated_total_value,
+        daily_values: updated.portfolio.daily_values
+      };
+    });
+
+    renderPortfolioDetail(state.currentPortfolio, state.currentStocks, state.recentTransactions);
+  } catch (_) {
+    // Keep persisted snapshot visible and show a sensible market-state fallback.
+    setMarketStateChip(fallbackMarketStateNowET());
+    setPortfolioLastUpdatedChip(0);
+  }
+}
+
+function stopLiveRefreshTimer() {
+  if (state.liveRefreshTimer) {
+    clearInterval(state.liveRefreshTimer);
+    state.liveRefreshTimer = null;
+  }
+}
+
+function stopDashboardLiveRefreshTimer() {
+  if (state.dashboardLiveRefreshTimer) {
+    clearInterval(state.dashboardLiveRefreshTimer);
+    state.dashboardLiveRefreshTimer = null;
+  }
+}
+
+async function refreshDashboardWithLivePrices() {
+  if (el.dashboardView.hidden) {
+    return;
+  }
+
+  try {
+    const payload = await apiGet("/api/live-prices");
+    const marketState = resolveMarketState(payload);
+    setDashboardMarketStateChip(marketState);
+
+    if (marketState !== "REGULAR") {
+      setDashboardLastUpdatedChip(0);
+      return;
+    }
+
+    const latestAsOf = latestAsOfFromPayload(payload);
+    setDashboardLastUpdatedChip(latestAsOf);
+
+    const rows = Array.isArray(payload?.portfolios) ? payload.portfolios : [];
+    const liveByName = new Map();
+    rows.forEach((row) => {
+      const name = String(row?.name || "").trim();
+      const estimatedTotalValue = safeNumber(row?.estimated_total_value);
+      if (!name || estimatedTotalValue <= 0) {
+        return;
+      }
+      liveByName.set(name, estimatedTotalValue);
+    });
+
+    if (!liveByName.size) {
+      return;
+    }
+
+    const nowTs = unixNow();
+    const todayBucket = Math.floor(nowTs / 86400);
+    state.portfolios = state.portfolios.map((portfolio) => {
+      const liveEstimate = liveByName.get(portfolio?.name);
+      if (!Number.isFinite(liveEstimate) || liveEstimate <= 0) {
+        return portfolio;
+      }
+
+      const dailyValues = Array.isArray(portfolio?.daily_values) ? [...portfolio.daily_values] : [];
+      const index = dailyValues.findIndex((point) => Math.floor(safeNumber(point?.date) / 86400) === todayBucket);
+      const livePoint = {
+        date: nowTs,
+        value: liveEstimate,
+        last_updated: nowTs
+      };
+
+      if (index >= 0) {
+        dailyValues[index] = livePoint;
+      } else {
+        dailyValues.push(livePoint);
+      }
+
+      return {
+        ...portfolio,
+        estimated_total_value: liveEstimate,
+        daily_values: dailyValues
+      };
+    });
+
+    renderDashboard();
+    setActiveView("dashboard");
+    setBreadcrumbs([{ label: "Dashboard" }]);
+  } catch (_) {
+    setDashboardMarketStateChip(fallbackMarketStateNowET());
+    setDashboardLastUpdatedChip(0);
+  }
+}
+
+function startDashboardLiveRefreshTimer() {
+  stopDashboardLiveRefreshTimer();
+  state.dashboardLiveRefreshTimer = setInterval(() => {
+    if (el.dashboardView.hidden) {
+      stopDashboardLiveRefreshTimer();
+      return;
+    }
+
+    refreshDashboardWithLivePrices();
+  }, LIVE_REFRESH_INTERVAL_MS);
+}
+
+function startLiveRefreshTimer(portfolioName) {
+  stopLiveRefreshTimer();
+  state.liveRefreshTimer = setInterval(() => {
+    if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
+      stopLiveRefreshTimer();
+      return;
+    }
+
+    refreshPortfolioWithLivePrices(portfolioName);
+  }, LIVE_REFRESH_INTERVAL_MS);
+}
+
 function showStockDialog(stock) {
   const performance = stockPerformance(stock);
   const toneClass = stockToneClass(
@@ -832,6 +1235,8 @@ function showStockDialog(stock) {
 async function openPortfolio(name) {
   hideFlash();
   try {
+    stopDashboardLiveRefreshTimer();
+
     const [portfolio, stocksPayload, recentPayload] = await Promise.all([
       apiGet(`/api/portfolios/${encodeURIComponent(name)}`),
       apiGet(`/api/portfolios/${encodeURIComponent(name)}/stocks`),
@@ -845,6 +1250,8 @@ async function openPortfolio(name) {
     setActiveView("portfolio");
 
     renderPortfolioDetail(state.currentPortfolio, state.currentStocks, state.recentTransactions);
+    setMarketStateChip(fallbackMarketStateNowET());
+    setPortfolioLastUpdatedChip(0);
 
     setBreadcrumbs([
       { label: "Dashboard", onClick: showDashboard },
@@ -852,6 +1259,9 @@ async function openPortfolio(name) {
     ]);
 
     localStorage.setItem(CURRENT_PORTFOLIO_KEY, name);
+
+    refreshPortfolioWithLivePrices(name);
+    startLiveRefreshTimer(name);
     return true;
   } catch (error) {
     showFlash(error.message);
@@ -860,6 +1270,11 @@ async function openPortfolio(name) {
 }
 
 function showDashboard() {
+  stopLiveRefreshTimer();
+  startDashboardLiveRefreshTimer();
+  refreshDashboardWithLivePrices();
+  setMarketStateChip("UNKNOWN");
+  setPortfolioLastUpdatedChip(0);
   setActiveView("dashboard");
   setBreadcrumbs([{ label: "Dashboard" }]);
   state.currentPortfolio = null;
