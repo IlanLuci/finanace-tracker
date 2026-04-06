@@ -128,22 +128,72 @@ function fallbackMarketStateNowET() {
   return "POST";
 }
 
-function resolveMarketState(payload) {
-  const topLevel = String(payload?.market_state || "").trim().toUpperCase();
-  if (topLevel) {
-    return topLevel;
+function normalizeMarketState(rawState) {
+  const normalized = String(rawState || "").trim().toUpperCase().replaceAll("-", "_").replaceAll(" ", "_");
+  if (!normalized) {
+    return "UNKNOWN";
   }
 
+  if (normalized === "OPEN" || normalized === "TRADING" || normalized === "OPEN_MARKET") {
+    return "REGULAR";
+  }
+
+  if (normalized.includes("REGULAR")) {
+    return "REGULAR";
+  }
+
+  if (normalized === "PRE" || normalized === "PREPRE" || normalized.startsWith("PRE")) {
+    return "PRE";
+  }
+
+  if (normalized === "POST" || normalized === "POSTPOST" || normalized.startsWith("POST")) {
+    return "POST";
+  }
+
+  if (normalized.includes("CLOSED")) {
+    return "CLOSED";
+  }
+
+  return normalized;
+}
+
+function isLiveMarketSession(marketState) {
+  const normalized = normalizeMarketState(marketState);
+  return normalized === "REGULAR" || normalized === "PRE" || normalized === "POST";
+}
+
+function resolveMarketState(payload) {
   const entries = Array.isArray(payload?.prices) ? payload.prices : [];
   for (const entry of entries) {
-    const candidate = String(entry?.market_state || "").trim().toUpperCase();
+    const candidate = normalizeMarketState(entry?.market_state);
     if (candidate === "REGULAR") {
       return candidate;
     }
   }
   for (const entry of entries) {
-    const candidate = String(entry?.market_state || "").trim().toUpperCase();
-    if (candidate) {
+    const candidate = normalizeMarketState(entry?.market_state);
+    if (candidate === "PRE" || candidate === "POST") {
+      return candidate;
+    }
+  }
+
+  const topLevel = normalizeMarketState(payload?.market_state);
+  if (topLevel === "REGULAR" || topLevel === "PRE" || topLevel === "POST") {
+    return topLevel;
+  }
+
+  if (topLevel === "CLOSED") {
+    // Some providers omit per-ticker marketState while still returning fresh quotes.
+    // In that case, infer session from ET clock instead of forcing CLOSED.
+    if (latestAsOfFromPayload(payload) > 0 || liveQuoteCountFromPayload(payload) > 0) {
+      return fallbackMarketStateNowET();
+    }
+    return "CLOSED";
+  }
+
+  for (const entry of entries) {
+    const candidate = normalizeMarketState(entry?.market_state);
+    if (candidate && candidate !== "UNKNOWN") {
       return candidate;
     }
   }
@@ -160,6 +210,11 @@ function latestAsOfFromPayload(payload) {
   return maxAsOf > 0 ? maxAsOf : 0;
 }
 
+function liveQuoteCountFromPayload(payload) {
+  const entries = Array.isArray(payload?.portfolios) ? payload.portfolios : [];
+  return entries.reduce((count, entry) => count + (safeNumber(entry?.quote_count) > 0 ? 1 : 0), 0);
+}
+
 function formatUpdatedLabel(unixSeconds) {
   if (!unixSeconds || unixSeconds <= 0) {
     return "Updated: n/a";
@@ -174,7 +229,7 @@ function formatUpdatedLabel(unixSeconds) {
 }
 
 function setMarketStateChip(marketState) {
-  const normalized = String(marketState || "UNKNOWN").toUpperCase();
+  const normalized = normalizeMarketState(marketState);
   state.liveMarketState = normalized;
 
   if (!el.marketStateChip) {
@@ -192,7 +247,7 @@ function setMarketStateChip(marketState) {
 }
 
 function setDashboardMarketStateChip(marketState) {
-  const normalized = String(marketState || "UNKNOWN").toUpperCase();
+  const normalized = normalizeMarketState(marketState);
   state.dashboardMarketState = normalized;
 
   const chip = document.getElementById("dashboardMarketStateChip");
@@ -346,6 +401,44 @@ function dateLabel(unixSeconds) {
 function percentage(value) {
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function signedCurrency(value) {
+  const amount = safeNumber(value);
+  const sign = amount > 0 ? "+" : "";
+  return `${sign}${currency(amount)}`;
+}
+
+function changeLabel(amount, percent) {
+  const changeAmount = safeNumber(amount);
+  const changePercent = safeNumber(percent);
+  return `${signedCurrency(changeAmount)} (${percentage(changePercent)})`;
+}
+
+function normalizeStocks(rawStocks) {
+  if (!Array.isArray(rawStocks)) {
+    return [];
+  }
+
+  return rawStocks
+    .filter((stock) => stock && typeof stock === "object" && typeof stock.ticker === "string")
+    .map((stock) => ({
+      ...stock,
+      ticker: String(stock.ticker),
+      company_name: String(stock.company_name || ""),
+      shares_owned: safeNumber(stock.shares_owned),
+      average_purchase_price: safeNumber(stock.average_purchase_price),
+      last_updated: safeNumber(stock.last_updated),
+      latest_close_price: safeNumber(stock.latest_close_price),
+      latest_close_date: safeNumber(stock.latest_close_date),
+      previous_close_price: safeNumber(stock.previous_close_price),
+      day_change_amount: safeNumber(stock.day_change_amount),
+      day_change_percent: safeNumber(stock.day_change_percent),
+      position_day_change_amount: safeNumber(stock.position_day_change_amount),
+      position_market_value: safeNumber(stock.position_market_value),
+      event_count: safeNumber(stock.event_count),
+      recent_events: Array.isArray(stock.recent_events) ? stock.recent_events : []
+    }));
 }
 
 function typeLabel(type) {
@@ -526,6 +619,16 @@ function stockToneClass(totalChange, hasBasis, isZeroCostBasisPosition = false) 
   return "stock-card-neutral";
 }
 
+function stockDayChangeToneClass(dayChangeAmount) {
+  if (dayChangeAmount > 0.0001) {
+    return "stock-card-positive";
+  }
+  if (dayChangeAmount < -0.0001) {
+    return "stock-card-negative";
+  }
+  return "stock-card-neutral";
+}
+
 function isWatchlistPortfolio(portfolio) {
   return String(portfolio?.type || "").toUpperCase() === "WATCHLIST";
 }
@@ -551,6 +654,8 @@ function normalizePortfolios(rawPortfolios) {
       available_capital: safeNumber(p.available_capital),
       estimated_total_value: safeNumber(p.estimated_total_value),
       reported_total_value: safeNumber(p.reported_total_value),
+      day_change_amount: safeNumber(p.day_change_amount),
+      day_change_percent: safeNumber(p.day_change_percent),
       stock_count: safeNumber(p.stock_count),
       transaction_count: safeNumber(p.transaction_count),
       daily_values: Array.isArray(p.daily_values)
@@ -749,12 +854,16 @@ function renderDashboard() {
 
   const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
   const totalCash = accountPortfolios.reduce((sum, p) => sum + (p.available_capital || 0), 0);
+  const totalDayChange = accountPortfolios.reduce((sum, p) => sum + (p.day_change_amount || 0), 0);
+  const previousTotalAssets = totalAssets - totalDayChange;
+  const totalDayChangePercent = previousTotalAssets > 0 ? (totalDayChange / previousTotalAssets) * 100 : 0;
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
   const totalTransactions = accountPortfolios.reduce((sum, p) => sum + (p.transaction_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
 
   const dashboardMetrics = `<section class="metric-grid">
     ${metricCard("Total Assets", currency(totalAssets), `${accountPortfolios.length} account portfolio${accountPortfolios.length === 1 ? "" : "s"}`)}
+    ${metricCard("Day Change", signedCurrency(totalDayChange), `${percentage(totalDayChangePercent)} vs previous close`)}
     ${metricCard("Total Available Cash", currency(totalCash), "Across account portfolios")}
     ${metricCard("Total Stock Positions", String(totalStocks), "Account positions only")}
     ${metricCard("Total Transactions", String(totalTransactions), "Account transaction history")}
@@ -770,7 +879,8 @@ function renderDashboard() {
         ${isWatchlistPortfolio(p)
           ? `<div class="sub">Watchlist only</div>
              <div class="sub">${p.stock_count} symbols tracked</div>`
-          : `<div>${currency(p.estimated_total_value)}</div>
+           : `<div>${currency(p.estimated_total_value)}</div>
+             <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
              <div class="sub">Cash: ${currency(p.available_capital)}</div>
              <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>`}
       </article>`
@@ -936,6 +1046,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
     el.portfolioMetrics.innerHTML = [
       metricCard("Estimated Total", currency(portfolio.estimated_total_value)),
+      metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
       metricCard("Available Capital", currency(portfolio.available_capital)),
       metricCard("Reported Total", currency(portfolio.reported_total_value)),
       metricCard("Position Value", currency(valueDelta), `${portfolio.transaction_count} transactions`)
@@ -955,7 +1066,8 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
         if (watchlist) {
           const latestTs = safeNumber(stock.latest_close_date);
-          return `<article class="stock-card stock-card-neutral fade-up" data-ticker="${stock.ticker}">
+          const toneClass = stockDayChangeToneClass(stock.day_change_amount);
+          return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
         <div class="stock-top">
           <strong>${stock.ticker}</strong>
           <span class="stock-market-value">${currency(stock.latest_close_price)}</span>
@@ -963,6 +1075,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
         <div class="stock-name">${stock.company_name || "Watchlist symbol"}</div>
         <div class="stock-stats">
           <span>Latest Price: ${currency(stock.latest_close_price)}</span>
+          <span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>
           <span>As Of: ${latestTs ? dateLabel(latestTs) : "n/a"}</span>
           <span>Click for actions</span>
         </div>
@@ -983,6 +1096,8 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
           <span>Shares: ${sharesFormat(stock.shares_owned)}</span>
           <span>Avg Cost: ${currency(stock.average_purchase_price)}</span>
           <span>Latest Close: ${currency(stock.latest_close_price)} on ${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</span>
+          <span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>
+          <span>Position Day Change: ${signedCurrency(stock.position_day_change_amount)}</span>
           <span>${perShareLabel}</span>
         </div>
       </article>`;
@@ -1160,13 +1275,12 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
     const marketState = resolveMarketState(payload);
     setMarketStateChip(marketState);
 
-    if (marketState !== "REGULAR") {
-      setPortfolioLastUpdatedChip(0);
-      return;
-    }
-
     const latestAsOf = latestAsOfFromPayload(payload);
     setPortfolioLastUpdatedChip(latestAsOf);
+
+    if (!isLiveMarketSession(marketState) && latestAsOf <= 0) {
+      return;
+    }
 
     const livePriceMap = priceMapFromPayload(payload);
     if (!livePriceMap.size) {
@@ -1212,31 +1326,24 @@ function stopDashboardLiveRefreshTimer() {
 }
 
 async function refreshDashboardWithLivePrices() {
-  if (el.dashboardView.hidden || state.activeView !== "dashboard") {
-    return;
-  }
-
   const requestSeq = ++state.dashboardRefreshRequestSeq;
+  const shouldRenderDashboard = !el.dashboardView.hidden && state.activeView === "dashboard";
 
   try {
     const payload = await apiGet("/api/live-prices");
     if (requestSeq < state.dashboardRefreshAppliedSeq) {
       return;
     }
-    if (el.dashboardView.hidden || state.activeView !== "dashboard") {
-      return;
-    }
 
     const marketState = resolveMarketState(payload);
     setDashboardMarketStateChip(marketState);
 
-    if (marketState !== "REGULAR") {
-      setDashboardLastUpdatedChip(0);
-      return;
-    }
-
     const latestAsOf = latestAsOfFromPayload(payload);
     setDashboardLastUpdatedChip(latestAsOf);
+
+    if (!isLiveMarketSession(marketState) && latestAsOf <= 0) {
+      return;
+    }
 
     const rows = Array.isArray(payload?.portfolios) ? payload.portfolios : [];
     const liveByName = new Map();
@@ -1282,12 +1389,14 @@ async function refreshDashboardWithLivePrices() {
       };
     });
 
-    renderDashboard();
-    setActiveView("dashboard");
-    setBreadcrumbs([{ label: "Dashboard" }]);
+    if (shouldRenderDashboard) {
+      renderDashboard();
+      setActiveView("dashboard");
+      setBreadcrumbs([{ label: "Dashboard" }]);
+    }
     state.dashboardRefreshAppliedSeq = requestSeq;
   } catch (_) {
-    if (el.dashboardView.hidden || state.activeView !== "dashboard") {
+    if (!shouldRenderDashboard) {
       return;
     }
     setDashboardMarketStateChip(fallbackMarketStateNowET());
@@ -1298,11 +1407,6 @@ async function refreshDashboardWithLivePrices() {
 function startDashboardLiveRefreshTimer() {
   stopDashboardLiveRefreshTimer();
   state.dashboardLiveRefreshTimer = setInterval(() => {
-    if (el.dashboardView.hidden) {
-      stopDashboardLiveRefreshTimer();
-      return;
-    }
-
     refreshDashboardWithLivePrices();
   }, LIVE_REFRESH_INTERVAL_MS);
 }
@@ -1332,6 +1436,7 @@ function showStockDialog(stock) {
         </div>
         <div class="stock-dialog-grid">
           <div><span>Latest Price</span><strong>${currency(stock.latest_close_price)}</strong></div>
+          <div><span>Day Change</span><strong>${changeLabel(stock.day_change_amount, stock.day_change_percent)}</strong></div>
           <div><span>As Of</span><strong>${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</strong></div>
           <div><span>Ticker</span><strong>${stock.ticker}</strong></div>
           <div><span>Mode</span><strong>Watchlist</strong></div>
@@ -1367,6 +1472,7 @@ function showStockDialog(stock) {
         <div><span>Market Value</span><strong>${currency(stock.position_market_value)}</strong></div>
         <div><span>Unrealized P/L</span><strong>${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}</strong></div>
         <div><span>Per Share</span><strong>${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)}</strong></div>
+        <div><span>Day Change</span><strong>${changeLabel(stock.day_change_amount, stock.day_change_percent)}</strong></div>
         <div><span>Latest Close</span><strong>${currency(stock.latest_close_price)}</strong></div>
       </div>
     </article>
@@ -1374,6 +1480,7 @@ function showStockDialog(stock) {
       ${metricCard("Shares Owned", sharesFormat(stock.shares_owned))}
       ${metricCard("Average Cost", currency(stock.average_purchase_price))}
       ${metricCard("Latest Close", currency(stock.latest_close_price), dateLabel(stock.latest_close_date))}
+      ${metricCard("Day Change", signedCurrency(stock.position_day_change_amount), `${changeLabel(stock.day_change_amount, stock.day_change_percent)} per share`)}
       ${metricCard("Unrealized P/L", `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`, `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`)}
     </section>
     <article class="panel">
@@ -1400,8 +1507,6 @@ function showStockDialog(stock) {
 async function openPortfolio(name) {
   hideFlash();
   try {
-    stopDashboardLiveRefreshTimer();
-
     const [portfolio, stocksPayload, recentPayload] = await Promise.all([
       apiGet(`/api/portfolios/${encodeURIComponent(name)}`),
       apiGet(`/api/portfolios/${encodeURIComponent(name)}/stocks`),
@@ -1409,7 +1514,7 @@ async function openPortfolio(name) {
     ]);
 
     state.currentPortfolio = portfolio;
-    state.currentStocks = stocksPayload.stocks || [];
+    state.currentStocks = normalizeStocks(stocksPayload.stocks || []);
     state.recentTransactions = recentPayload.transactions || [];
 
     setActiveView("portfolio");
@@ -1670,6 +1775,7 @@ async function loadDashboard() {
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
     renderDashboard();
+    startDashboardLiveRefreshTimer();
 
     const savedPortfolio = localStorage.getItem(CURRENT_PORTFOLIO_KEY);
     if (savedPortfolio) {

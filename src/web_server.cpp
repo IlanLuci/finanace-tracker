@@ -36,7 +36,13 @@ namespace
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
+    constexpr long long SECONDS_PER_DAY = 86400;
     std::mutex g_data_access_mutex;
+
+    long long dayBucketForTimestamp(time_t ts)
+    {
+        return static_cast<long long>(ts) / SECONDS_PER_DAY;
+    }
 
     time_t nextDailySyncTimeLocal(time_t now)
     {
@@ -509,6 +515,49 @@ namespace
         return upper;
     }
 
+    std::string normalizeMarketState(const std::string& raw)
+    {
+        std::string normalized = upperCopy(trim(raw));
+        if (normalized.empty())
+        {
+            return "UNKNOWN";
+        }
+
+        if (normalized == "OPEN" || normalized == "TRADING" || normalized == "OPEN_MARKET")
+        {
+            return "REGULAR";
+        }
+
+        for (char& ch : normalized)
+        {
+            if (ch == ' ' || ch == '-')
+            {
+                ch = '_';
+            }
+        }
+
+        if (normalized.find("REGULAR") != std::string::npos)
+        {
+            return "REGULAR";
+        }
+        if (normalized == "PRE" || normalized == "PREPRE" ||
+            normalized.find("PRE") == 0)
+        {
+            return "PRE";
+        }
+        if (normalized == "POST" || normalized == "POSTPOST" ||
+            normalized.find("POST") == 0)
+        {
+            return "POST";
+        }
+        if (normalized.find("CLOSED") != std::string::npos)
+        {
+            return "CLOSED";
+        }
+
+        return normalized;
+    }
+
     std::string shellEscapeSingleQuoted(const std::string& value)
     {
         std::string escaped;
@@ -933,7 +982,7 @@ namespace
                     std::string market_state = "UNKNOWN";
                     if (parseJsonStringField(chart_response, "marketState", market_state))
                     {
-                        market_state = upperCopy(trim(market_state));
+                        market_state = normalizeMarketState(market_state);
                     }
 
                     out_quotes[symbol] = std::make_tuple(market_price, market_time, market_state);
@@ -1001,11 +1050,7 @@ namespace
             auto market_state_it = entry.object_value.find("marketState");
             if (market_state_it != entry.object_value.end() && market_state_it->second.type == JsonType::STRING)
             {
-                market_state = upperCopy(trim(market_state_it->second.string_value));
-                if (market_state.empty())
-                {
-                    market_state = "UNKNOWN";
-                }
+                market_state = normalizeMarketState(market_state_it->second.string_value);
             }
 
             time_t market_time = std::time(nullptr);
@@ -1457,6 +1502,162 @@ namespace
         return total;
     }
 
+    bool getLatestAndPreviousDistinctDayValues(const std::vector<DailyPortfolioValue>& values,
+                                               double& latest_value,
+                                               time_t& latest_date,
+                                               double& previous_value,
+                                               time_t& previous_date)
+    {
+        if (values.empty())
+        {
+            return false;
+        }
+
+        std::vector<DailyPortfolioValue> sorted_values = values;
+        std::sort(
+            sorted_values.begin(),
+            sorted_values.end(),
+            [](const DailyPortfolioValue& lhs, const DailyPortfolioValue& rhs)
+            {
+                return lhs.date < rhs.date;
+            }
+        );
+
+        const DailyPortfolioValue& latest = sorted_values.back();
+        latest_value = latest.value;
+        latest_date = latest.date;
+
+        const long long latest_bucket = dayBucketForTimestamp(latest.date);
+        for (auto it = sorted_values.rbegin() + 1; it != sorted_values.rend(); ++it)
+        {
+            if (dayBucketForTimestamp(it->date) < latest_bucket)
+            {
+                previous_value = it->value;
+                previous_date = it->date;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    double calculatePortfolioDayChangeAmount(const Portfolio& portfolio,
+                                             PortfolioManager& manager,
+                                             const std::string& portfolio_name)
+    {
+        if (portfolio.getType() == PortfolioType::WATCHLIST)
+        {
+            return 0.0;
+        }
+
+        double latest_value = 0.0;
+        time_t latest_date = 0;
+        double previous_value = 0.0;
+        time_t previous_date = 0;
+        if (!getLatestAndPreviousDistinctDayValues(portfolio.getDailyValues(), latest_value, latest_date, previous_value, previous_date))
+        {
+            return 0.0;
+        }
+
+        const double current_total = estimatePortfolioTotalValue(portfolio, manager, portfolio_name);
+        return current_total - previous_value;
+    }
+
+    double calculatePortfolioDayChangePercent(const Portfolio& portfolio,
+                                              PortfolioManager& manager,
+                                              const std::string& portfolio_name)
+    {
+        double latest_value = 0.0;
+        time_t latest_date = 0;
+        double previous_value = 0.0;
+        time_t previous_date = 0;
+        if (!getLatestAndPreviousDistinctDayValues(portfolio.getDailyValues(), latest_value, latest_date, previous_value, previous_date))
+        {
+            return 0.0;
+        }
+
+        if (std::abs(previous_value) < 1e-9)
+        {
+            return 0.0;
+        }
+
+        const double amount = estimatePortfolioTotalValue(portfolio, manager, portfolio_name) - previous_value;
+        return (amount / std::abs(previous_value)) * 100.0;
+    }
+
+    bool getLatestAndPreviousStockPrices(const StockData& stock,
+                                         double& latest_price,
+                                         time_t& latest_date,
+                                         double& previous_price,
+                                         time_t& previous_date)
+    {
+        const auto& prices = stock.getPriceHistory();
+        if (prices.empty())
+        {
+            return false;
+        }
+
+        std::vector<DailyStockPrice> sorted_prices = prices;
+        std::sort(
+            sorted_prices.begin(),
+            sorted_prices.end(),
+            [](const DailyStockPrice& lhs, const DailyStockPrice& rhs)
+            {
+                return lhs.date < rhs.date;
+            }
+        );
+
+        const DailyStockPrice& latest = sorted_prices.back();
+        latest_price = latest.close_price;
+        latest_date = latest.date;
+
+        const long long latest_bucket = dayBucketForTimestamp(latest.date);
+        for (auto it = sorted_prices.rbegin() + 1; it != sorted_prices.rend(); ++it)
+        {
+            if (dayBucketForTimestamp(it->date) < latest_bucket)
+            {
+                previous_price = it->close_price;
+                previous_date = it->date;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    double calculateStockDayChangeAmount(const StockData& stock)
+    {
+        double latest_price = 0.0;
+        time_t latest_date = 0;
+        double previous_price = 0.0;
+        time_t previous_date = 0;
+        if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+        {
+            return 0.0;
+        }
+
+        return latest_price - previous_price;
+    }
+
+    double calculateStockDayChangePercent(const StockData& stock)
+    {
+        double latest_price = 0.0;
+        time_t latest_date = 0;
+        double previous_price = 0.0;
+        time_t previous_date = 0;
+        if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+        {
+            return 0.0;
+        }
+
+        if (std::abs(previous_price) < 1e-9)
+        {
+            return 0.0;
+        }
+
+        return ((latest_price - previous_price) / std::abs(previous_price)) * 100.0;
+    }
+
     double calculateSharesOwnedFromTransactions(const Portfolio& portfolio, const std::string& ticker)
     {
         const std::string normalized_ticker = upperCopy(ticker);
@@ -1520,6 +1721,8 @@ namespace
                 << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital()) << ","
                 << "\"reported_total_value\":" << jsonNumber(portfolio.getCurrentPortfolioValue()) << ","
                 << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
+                << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
+                << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
                 << "\"stock_count\":" << manager.listStocks(name).size() << ","
                 << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
                 << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues())
@@ -1545,6 +1748,8 @@ namespace
             << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital()) << ","
             << "\"reported_total_value\":" << jsonNumber(portfolio.getCurrentPortfolioValue()) << ","
             << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
+            << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
+            << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
             << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues()) << ","
             << "\"transaction_count\":" << portfolio.getTransactions().size()
             << "}";
@@ -1578,19 +1783,16 @@ namespace
 
             double latest_price = 0.0;
             time_t latest_price_date = 0;
+            double previous_price = 0.0;
+            time_t previous_price_date = 0;
             if (!stock.getPriceHistory().empty())
             {
-                auto latest_it = std::max_element(
-                    stock.getPriceHistory().begin(),
-                    stock.getPriceHistory().end(),
-                    [](const DailyStockPrice& lhs, const DailyStockPrice& rhs)
-                    {
-                        return lhs.date < rhs.date;
-                    }
-                );
-                latest_price = latest_it->close_price;
-                latest_price_date = latest_it->date;
+                getLatestAndPreviousStockPrices(stock, latest_price, latest_price_date, previous_price, previous_price_date);
             }
+
+            const double day_change_amount = calculateStockDayChangeAmount(stock);
+            const double day_change_percent = calculateStockDayChangePercent(stock);
+            const double position_day_change_amount = stock.getSharesOwned() * day_change_amount;
 
             const bool is_watchlist_portfolio = has_portfolio && portfolio.getType() == PortfolioType::WATCHLIST;
             const double display_market_value = is_watchlist_portfolio
@@ -1605,6 +1807,10 @@ namespace
                 << "\"last_updated\":" << static_cast<long long>(stock.getLastUpdated()) << ","
                 << "\"latest_close_price\":" << jsonNumber(latest_price) << ","
                 << "\"latest_close_date\":" << static_cast<long long>(latest_price_date) << ","
+                << "\"previous_close_price\":" << jsonNumber(previous_price) << ","
+                << "\"day_change_amount\":" << jsonNumber(day_change_amount) << ","
+                << "\"day_change_percent\":" << jsonNumber(day_change_percent) << ","
+                << "\"position_day_change_amount\":" << jsonNumber(position_day_change_amount) << ","
                 << "\"position_market_value\":" << jsonNumber(display_market_value) << ","
                 << "\"event_count\":" << stock.getEvents().size() << ","
                 << "\"recent_events\":";
@@ -2066,7 +2272,7 @@ namespace
                 }
 
                 if (aggregate_market_state != "REGULAR" &&
-                    (quote_state == "PRE" || quote_state == "PREPRE" || quote_state == "POST"))
+                    (quote_state == "PRE" || quote_state == "POST"))
                 {
                     aggregate_market_state = quote_state;
                 }
@@ -2286,7 +2492,7 @@ namespace
                         aggregate_market_state = "REGULAR";
                     }
                     else if (aggregate_market_state != "REGULAR" &&
-                             (quote_state == "PRE" || quote_state == "PREPRE" || quote_state == "POST"))
+                             (quote_state == "PRE" || quote_state == "POST"))
                     {
                         aggregate_market_state = quote_state;
                     }
