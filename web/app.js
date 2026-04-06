@@ -13,7 +13,8 @@ const state = {
   },
   charts: {
     dashboard: null,
-    portfolio: null
+    portfolio: null,
+    allocation: null
   }
 };
 
@@ -58,7 +59,10 @@ const el = {
   apiStatus: document.getElementById("apiStatus"),
   portfolioPeriodSelect: document.getElementById("portfolioPeriodSelect"),
   portfolioChangeChip: document.getElementById("portfolioChangeChip"),
-  portfolioChart: document.getElementById("portfolioChart")
+  portfolioChart: document.getElementById("portfolioChart"),
+  portfolioAllocationChart: document.getElementById("portfolioAllocationChart"),
+  allocationCoverageChip: document.getElementById("allocationCoverageChip"),
+  allocationEmptyState: document.getElementById("allocationEmptyState")
 };
 
 const PERIOD_OPTIONS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
@@ -435,6 +439,77 @@ function createLineChart(canvas, points, label, color) {
   });
 }
 
+function createPieChart(canvas, labels, values, colors) {
+  if (!canvas || !window.Chart) {
+    return null;
+  }
+
+  return new window.Chart(canvas, {
+    type: "pie",
+    data: {
+      labels,
+      datasets: [
+        {
+          data: values,
+          backgroundColor: colors,
+          borderColor: "rgba(15, 20, 25, 0.82)",
+          borderWidth: 1,
+          hoverOffset: 8
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "right",
+          labels: {
+            color: "#d9e1ec",
+            usePointStyle: true,
+            boxWidth: 10,
+            boxHeight: 10,
+            font: {
+              size: 12,
+              weight: "600"
+            }
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const dataset = ctx.dataset?.data || [];
+              const total = dataset.reduce((sum, value) => sum + safeNumber(value), 0);
+              const current = safeNumber(ctx.parsed);
+              const percent = total > 0 ? (current / total) * 100 : 0;
+              return `${ctx.label}: ${currency(current)} (${percent.toFixed(1)}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function allocationPalette(size) {
+  const themePalette = [
+    "#3b82f6",
+    "#10b981",
+    "#f59e0b",
+    "#60a5fa",
+    "#34d399",
+    "#fbbf24",
+    "#1d4ed8",
+    "#059669",
+    "#d97706",
+    "#93c5fd",
+    "#6ee7b7",
+    "#fcd34d"
+  ];
+
+  return Array.from({ length: Math.max(size, 0) }, (_, index) => themePalette[index % themePalette.length]);
+}
+
 function renderTransactionTable(transactions) {
   if (!transactions.length) {
     return "<p>No transactions yet.</p>";
@@ -589,6 +664,43 @@ function renderPortfolioChart() {
   );
 }
 
+function renderAllocationChart(stocks, portfolio) {
+  const normalizedStocks = Array.isArray(stocks) ? stocks : [];
+  const points = normalizedStocks
+    .map((stock) => ({
+      ticker: String(stock?.ticker || "").trim(),
+      value: safeNumber(stock?.position_market_value)
+    }))
+    .filter((stock) => stock.ticker && stock.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  const sumValue = points.reduce((sum, stock) => sum + stock.value, 0);
+  const portfolioEstimate = safeNumber(portfolio?.estimated_total_value);
+  const coverage = portfolioEstimate > 0 ? (sumValue / portfolioEstimate) * 100 : 0;
+
+  if (!points.length || sumValue <= 0) {
+    el.portfolioAllocationChart.hidden = true;
+    el.allocationEmptyState.hidden = false;
+    el.allocationCoverageChip.className = "chip chip-neutral";
+    el.allocationCoverageChip.textContent = "Coverage: n/a";
+    destroyChart("allocation");
+    return;
+  }
+
+  el.portfolioAllocationChart.hidden = false;
+  el.allocationEmptyState.hidden = true;
+  el.allocationCoverageChip.className = `chip ${trendChipClass(coverage - 100, true)}`;
+  el.allocationCoverageChip.textContent = `Coverage: ${coverage.toFixed(1)}%`;
+
+  destroyChart("allocation");
+  state.charts.allocation = createPieChart(
+    el.portfolioAllocationChart,
+    points.map((point) => point.ticker),
+    points.map((point) => point.value),
+    allocationPalette(points.length)
+  );
+}
+
 function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   el.portfolioName.textContent = portfolioDisplayName(portfolio.name);
   el.portfolioType.textContent = typeLabel(portfolio.type);
@@ -652,6 +764,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   };
 
   renderPortfolioChart();
+  renderAllocationChart(stocks, portfolio);
 }
 
 function showStockDialog(stock) {

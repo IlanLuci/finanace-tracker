@@ -94,6 +94,15 @@
             <button id="viewAllTransactionsBtn" class="ghost-btn" type="button">View Full History</button>
           </article>
         </section>
+
+        <article class="panel allocation-panel">
+          <div class="panel-head">
+            <h3>Stock Allocation</h3>
+            <span id="allocationCoverageChip" class="chip chip-neutral">Coverage: n/a</span>
+          </div>
+          <canvas id="portfolioAllocationChart" aria-label="Portfolio Stock Allocation Chart"></canvas>
+          <p id="allocationEmptyState" class="allocation-empty" hidden>No stock allocation data available.</p>
+        </article>
       </section>
     </section>
   </main>

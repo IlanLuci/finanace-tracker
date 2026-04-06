@@ -216,6 +216,22 @@ h3 {
   height: 340px !important;
 }
 
+.allocation-panel {
+  background: linear-gradient(180deg, rgba(26, 35, 50, 0.9) 0%, rgba(20, 27, 39, 0.84) 100%);
+}
+
+.allocation-panel canvas {
+  display: block;
+  width: 100% !important;
+  height: 340px !important;
+}
+
+.allocation-empty {
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -731,7 +747,8 @@ select {
 @media (max-width: 960px) {
   #dashboardView .chart-panel canvas,
   #portfolioView .chart-panel canvas,
-  .chart-panel canvas {
+  .chart-panel canvas,
+  .allocation-panel canvas {
     height: 280px !important;
   }
 
@@ -749,7 +766,8 @@ select {
 @media (max-width: 680px) {
   #dashboardView .chart-panel canvas,
   #portfolioView .chart-panel canvas,
-  .chart-panel canvas {
+  .chart-panel canvas,
+  .allocation-panel canvas {
     height: 220px !important;
   }
 
