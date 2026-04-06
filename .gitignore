@@ -1,8 +1,9 @@
 *.o
 finance_tracker
+recompute_daily_values
+.DS_Store
 
 data/
 
 test_persistence
-test_persistence.cpp
 .env
