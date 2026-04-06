@@ -561,6 +561,10 @@ article.stock-card-neutral {
   width: min(1080px, 96vw);
 }
 
+#createPortfolioDialog {
+  width: min(620px, 94vw);
+}
+
 .field-row {
   display: grid;
   gap: 5px;

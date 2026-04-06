@@ -50,6 +50,12 @@ const el = {
   stockDialog: document.getElementById("stockDialog"),
   stockDialogTitle: document.getElementById("stockDialogTitle"),
   stockDialogBody: document.getElementById("stockDialogBody"),
+  createPortfolioDialog: document.getElementById("createPortfolioDialog"),
+  createPortfolioForm: document.getElementById("createPortfolioForm"),
+  createPortfolioName: document.getElementById("createPortfolioName"),
+  createPortfolioType: document.getElementById("createPortfolioType"),
+  createPortfolioCapital: document.getElementById("createPortfolioCapital"),
+  createPortfolioSubmitBtn: document.getElementById("createPortfolioSubmitBtn"),
   backToDashBtn: document.getElementById("backToDashBtn"),
   apiConfigToggle: document.getElementById("apiConfigToggle"),
   apiConfigPanel: document.getElementById("apiConfigPanel"),
@@ -598,10 +604,16 @@ function renderDashboard() {
     <section>
       <div class="panel-head">
         <h3>Portfolios</h3>
+        <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Portfolio</button>
       </div>
       ${cards ? `<div class="dashboard-cards">${cards}</div>` : emptyState}
     </section>
   `;
+
+  const openPortfolioCreateDialogBtn = document.getElementById("openPortfolioCreateDialogBtn");
+  if (openPortfolioCreateDialogBtn) {
+    openPortfolioCreateDialogBtn.addEventListener("click", openCreatePortfolioDialog);
+  }
 
   document.querySelectorAll(".portfolio-card").forEach((card) => {
     card.addEventListener("click", () => {
@@ -909,6 +921,17 @@ function resetTransactionForm() {
   updateTransactionFormVisibility();
 }
 
+function resetCreatePortfolioForm() {
+  el.createPortfolioForm.reset();
+  el.createPortfolioType.value = "BROKERAGE";
+  el.createPortfolioCapital.value = "0";
+}
+
+function openCreatePortfolioDialog() {
+  resetCreatePortfolioForm();
+  el.createPortfolioDialog.showModal();
+}
+
 function openTransactionDialog() {
   if (!state.currentPortfolio) {
     showFlash("Select a portfolio first.");
@@ -987,6 +1010,49 @@ async function showAllTransactions() {
   }
 }
 
+async function submitCreatePortfolioForm(event) {
+  event.preventDefault();
+
+  const name = el.createPortfolioName.value.trim();
+  const type = el.createPortfolioType.value;
+  const initialCapital = safeNumber(el.createPortfolioCapital.value);
+
+  if (!name) {
+    showFlash("Portfolio name is required.");
+    return;
+  }
+
+  if (initialCapital < 0) {
+    showFlash("Initial capital must be non-negative.");
+    return;
+  }
+
+  try {
+    el.createPortfolioSubmitBtn.disabled = true;
+
+    const created = await apiPost("/api/portfolios", {
+      name,
+      type,
+      initial_capital: initialCapital
+    });
+
+    const payload = await apiGet("/api/portfolios");
+    state.portfolios = normalizePortfolios(payload.portfolios);
+    renderDashboard();
+    showDashboard();
+
+    const createdName = String(created?.name || name);
+    await openPortfolio(createdName);
+
+    el.createPortfolioDialog.close();
+    showFlash(`Created portfolio ${portfolioDisplayName(createdName)}.`);
+  } catch (error) {
+    showFlash(error.message);
+  } finally {
+    el.createPortfolioSubmitBtn.disabled = false;
+  }
+}
+
 async function loadDashboard() {
   hideFlash();
   try {
@@ -1041,6 +1107,7 @@ function wireEvents() {
   el.openTransactionDialogBtn.addEventListener("click", openTransactionDialog);
   el.transactionType.addEventListener("change", updateTransactionFormVisibility);
   el.transactionForm.addEventListener("submit", submitTransactionForm);
+  el.createPortfolioForm.addEventListener("submit", submitCreatePortfolioForm);
 
   el.apiConfigToggle.addEventListener("click", toggleApiPanel);
   el.apiConfigForm.addEventListener("submit", saveApiBase);
@@ -1052,6 +1119,7 @@ function init() {
   setActiveView("dashboard");
   wireEvents();
   updateTransactionFormVisibility();
+  resetCreatePortfolioForm();
   loadDashboard();
 }
 

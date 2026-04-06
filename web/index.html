@@ -176,5 +176,36 @@
     </form>
     <div id="stockDialogBody"></div>
   </dialog>
+
+  <dialog id="createPortfolioDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h3>Create Portfolio</h3>
+      <button class="ghost-btn" value="cancel" type="submit">Close</button>
+    </form>
+    <form id="createPortfolioForm" class="tx-form">
+      <div class="field-row">
+        <label for="createPortfolioName">Portfolio Name</label>
+        <input id="createPortfolioName" name="name" type="text" maxlength="80" placeholder="My Brokerage" autocomplete="off" required />
+      </div>
+
+      <div class="field-row">
+        <label for="createPortfolioType">Type</label>
+        <select id="createPortfolioType" name="type" class="graph-period-select" required>
+          <option value="BROKERAGE">Brokerage</option>
+          <option value="ROTH_IRA">Roth IRA</option>
+          <option value="TRADITIONAL_IRA">Traditional IRA</option>
+        </select>
+      </div>
+
+      <div class="field-row">
+        <label for="createPortfolioCapital">Initial Capital</label>
+        <input id="createPortfolioCapital" name="initialCapital" type="number" min="0" step="0.01" value="0" />
+      </div>
+
+      <div class="row-actions">
+        <button id="createPortfolioSubmitBtn" class="primary-btn" type="submit">Create Portfolio</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>

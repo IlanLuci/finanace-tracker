@@ -556,6 +556,57 @@ namespace
         return true;
     }
 
+    bool isValidPortfolioName(const std::string& name)
+    {
+        if (name.empty() || name.size() > 80)
+        {
+            return false;
+        }
+
+        if (name == "." || name == "..")
+        {
+            return false;
+        }
+
+        for (const char ch : name)
+        {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (!std::isalnum(uch) && ch != '_' && ch != '-' && ch != '.' && ch != ' ')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    std::optional<PortfolioType> parsePortfolioType(const std::string& raw)
+    {
+        std::string normalized = upperCopy(trim(raw));
+        for (char& ch : normalized)
+        {
+            if (ch == ' ' || ch == '-')
+            {
+                ch = '_';
+            }
+        }
+
+        if (normalized == "BROKERAGE")
+        {
+            return PortfolioType::BROKERAGE;
+        }
+        if (normalized == "ROTH_IRA")
+        {
+            return PortfolioType::ROTH_IRA;
+        }
+        if (normalized == "TRADITIONAL_IRA")
+        {
+            return PortfolioType::TRADITIONAL_IRA;
+        }
+
+        return std::nullopt;
+    }
+
     bool maybeTickerExistsOnYahoo(const std::string& ticker, bool& is_invalid_ticker)
     {
         is_invalid_ticker = false;
@@ -1562,6 +1613,70 @@ namespace
         if (request.method == "GET" && request.path == "/api/portfolios")
         {
             return makeJsonResponse(200, buildPortfolioSummaryJson(manager));
+        }
+
+        if (request.method == "POST" && request.path == "/api/portfolios")
+        {
+            JsonValue body;
+            HttpResponse parse_error = parseJsonBodyObject(request, body);
+            if (parse_error.status != 200)
+            {
+                return parse_error;
+            }
+
+            auto raw_name = getObjectString(body, "name");
+            auto raw_type = getObjectString(body, "type");
+            if (!raw_name.has_value() || !raw_type.has_value())
+            {
+                return makeJsonResponse(400, makeErrorBody("name and type are required"));
+            }
+
+            const std::string portfolio_name = trim(raw_name.value());
+            if (!isValidPortfolioName(portfolio_name))
+            {
+                return makeJsonResponse(400, makeErrorBody("name contains invalid characters or length"));
+            }
+
+            auto parsed_type = parsePortfolioType(raw_type.value());
+            if (!parsed_type.has_value())
+            {
+                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, or TRADITIONAL_IRA"));
+            }
+
+            const double initial_capital = getObjectNumber(body, "initial_capital").value_or(0.0);
+            if (!isFiniteNonNegative(initial_capital))
+            {
+                return makeJsonResponse(400, makeErrorBody("initial_capital must be >= 0"));
+            }
+
+            if (manager.scanPortfolios())
+            {
+                const auto& names = manager.getPortfolioNames();
+                if (std::find(names.begin(), names.end(), portfolio_name) != names.end())
+                {
+                    return makeJsonResponse(409, makeErrorBody("Portfolio already exists"));
+                }
+            }
+
+            if (!manager.createPortfolio(portfolio_name, parsed_type.value(), initial_capital))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to create portfolio"));
+            }
+
+            Portfolio created;
+            if (!manager.loadPortfolio(portfolio_name, created))
+            {
+                return makeJsonResponse(500, makeErrorBody("Portfolio created but failed to load"));
+            }
+
+            std::ostringstream out;
+            out << "{"
+                << "\"status\":\"ok\"," 
+                << "\"name\":" << jsonString(portfolio_name) << ","
+                << "\"type\":" << jsonString(portfolioTypeToString(created.getType())) << ","
+                << "\"available_capital\":" << jsonNumber(created.getAvailableCapital())
+                << "}";
+            return makeJsonResponse(201, out.str());
         }
 
         if (segments.size() >= 3 && segments[0] == "api" && segments[1] == "portfolios")
