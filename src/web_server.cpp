@@ -1541,13 +1541,61 @@ namespace
         return false;
     }
 
+    bool getLatestAndPreviousStockPrices(const StockData& stock,
+                                         double& latest_price,
+                                         time_t& latest_date,
+                                         double& previous_price,
+                                         time_t& previous_date);
+
+    bool calculateWatchlistDayChangeTotals(PortfolioManager& manager,
+                                           const std::string& portfolio_name,
+                                           double& day_change_amount,
+                                           double& previous_close_total)
+    {
+        day_change_amount = 0.0;
+        previous_close_total = 0.0;
+
+        bool has_previous_close = false;
+        const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+        for (const std::string& ticker : tickers)
+        {
+            StockData stock;
+            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            {
+                continue;
+            }
+
+            double latest_price = 0.0;
+            time_t latest_date = 0;
+            double previous_price = 0.0;
+            time_t previous_date = 0;
+            if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+            {
+                continue;
+            }
+
+            day_change_amount += (latest_price - previous_price);
+            previous_close_total += previous_price;
+            has_previous_close = true;
+        }
+
+        return has_previous_close;
+    }
+
     double calculatePortfolioDayChangeAmount(const Portfolio& portfolio,
                                              PortfolioManager& manager,
                                              const std::string& portfolio_name)
     {
         if (portfolio.getType() == PortfolioType::WATCHLIST)
         {
-            return 0.0;
+            double day_change_amount = 0.0;
+            double previous_close_total = 0.0;
+            if (!calculateWatchlistDayChangeTotals(manager, portfolio_name, day_change_amount, previous_close_total))
+            {
+                return 0.0;
+            }
+
+            return day_change_amount;
         }
 
         double latest_value = 0.0;
@@ -1567,6 +1615,23 @@ namespace
                                               PortfolioManager& manager,
                                               const std::string& portfolio_name)
     {
+        if (portfolio.getType() == PortfolioType::WATCHLIST)
+        {
+            double day_change_amount = 0.0;
+            double previous_close_total = 0.0;
+            if (!calculateWatchlistDayChangeTotals(manager, portfolio_name, day_change_amount, previous_close_total))
+            {
+                return 0.0;
+            }
+
+            if (std::abs(previous_close_total) < 1e-9)
+            {
+                return 0.0;
+            }
+
+            return (day_change_amount / std::abs(previous_close_total)) * 100.0;
+        }
+
         double latest_value = 0.0;
         time_t latest_date = 0;
         double previous_value = 0.0;

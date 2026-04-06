@@ -16,6 +16,8 @@ const state = {
   activeView: "dashboard",
   dashboardRefreshRequestSeq: 0,
   dashboardRefreshAppliedSeq: 0,
+  portfolioLiveRefreshInFlight: false,
+  dashboardLiveRefreshInFlight: false,
   periods: {
     dashboard: "6M",
     portfolio: "6M"
@@ -87,6 +89,7 @@ const el = {
 const PERIOD_OPTIONS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
 
 const LIVE_REFRESH_INTERVAL_MS = 15000;
+const LIVE_REFRESH_REQUEST_TIMEOUT_MS = 10000;
 
 function unixNow() {
   return Math.floor(Date.now() / 1000);
@@ -326,6 +329,27 @@ async function apiGet(path) {
     throw new Error(data.error || `Request failed: ${response.status}`);
   }
   return data;
+}
+
+async function apiGetWithTimeout(path, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(apiUrl(path), { signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Live request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function apiPost(path, body) {
@@ -902,6 +926,7 @@ function renderDashboard() {
         </div>
         ${isWatchlistPortfolio(p)
           ? `<div class="sub">Watchlist only</div>
+             <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
              <div class="sub">${p.stock_count} symbols tracked</div>`
            : `<div>${currency(p.estimated_total_value)}</div>
              <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
@@ -1062,6 +1087,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   if (watchlist) {
     el.portfolioMetrics.innerHTML = [
       metricCard("Tracked Symbols", String(stocks.length), "No transaction ledger"),
+      metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
       metricCard("Transactions", "Disabled", "Watchlist mode"),
       metricCard("Account Totals", "Excluded", "Not included in portfolio totals"),
       metricCard("Initial Capital", "Not Applicable", "Watchlists do not hold cash")
@@ -1235,6 +1261,7 @@ function priceMapFromPayload(payload) {
 
 function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
   const nowTs = unixNow();
+  const watchlist = isWatchlistPortfolio(portfolio);
   const updatedStocks = (Array.isArray(stocks) ? stocks : []).map((stock) => {
     const ticker = String(stock?.ticker || "").trim().toUpperCase();
     const live = livePriceMap.get(ticker);
@@ -1243,7 +1270,7 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
     }
 
     const shares = safeNumber(stock?.shares_owned);
-    const livePositionValue = shares * live.price;
+    const livePositionValue = watchlist ? live.price : shares * live.price;
     const previousClose = safeNumber(stock?.previous_close_price);
     const dayChangeAmount = Number.isFinite(previousClose) && previousClose > 0
       ? (live.price - previousClose)
@@ -1257,7 +1284,7 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
       latest_close_date: live.asOf,
       day_change_amount: dayChangeAmount,
       day_change_percent: dayChangePercent,
-      position_day_change_amount: shares * dayChangeAmount,
+      position_day_change_amount: watchlist ? dayChangeAmount : shares * dayChangeAmount,
       position_market_value: livePositionValue
     };
   });
@@ -1269,15 +1296,32 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
 
   const updatedPortfolio = {
     ...portfolio,
-    estimated_total_value: safeNumber(portfolio?.available_capital) + totalPositionValue,
+    estimated_total_value: watchlist
+      ? totalPositionValue
+      : safeNumber(portfolio?.available_capital) + totalPositionValue,
     daily_values: Array.isArray(portfolio?.daily_values) ? [...portfolio.daily_values] : []
   };
 
-  const previousDayValue = previousDistinctDayValue(updatedPortfolio.daily_values, nowTs);
-  if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
-    const dayChangeAmount = updatedPortfolio.estimated_total_value - previousDayValue;
+  if (watchlist) {
+    const previousCloseTotal = updatedStocks.reduce(
+      (sum, stock) => sum + safeNumber(stock?.previous_close_price),
+      0
+    );
+    const dayChangeAmount = updatedStocks.reduce(
+      (sum, stock) => sum + safeNumber(stock?.day_change_amount),
+      0
+    );
     updatedPortfolio.day_change_amount = dayChangeAmount;
-    updatedPortfolio.day_change_percent = (dayChangeAmount / previousDayValue) * 100;
+    updatedPortfolio.day_change_percent = previousCloseTotal > 0
+      ? (dayChangeAmount / previousCloseTotal) * 100
+      : 0;
+  } else {
+    const previousDayValue = previousDistinctDayValue(updatedPortfolio.daily_values, nowTs);
+    if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
+      const dayChangeAmount = updatedPortfolio.estimated_total_value - previousDayValue;
+      updatedPortfolio.day_change_amount = dayChangeAmount;
+      updatedPortfolio.day_change_percent = (dayChangeAmount / previousDayValue) * 100;
+    }
   }
 
   const todayBucket = Math.floor(nowTs / 86400);
@@ -1307,8 +1351,17 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
     return;
   }
 
+  if (state.portfolioLiveRefreshInFlight) {
+    return;
+  }
+
+  state.portfolioLiveRefreshInFlight = true;
+
   try {
-    const payload = await apiGet(`/api/portfolios/${encodeURIComponent(portfolioName)}/live-prices`);
+    const payload = await apiGetWithTimeout(
+      `/api/portfolios/${encodeURIComponent(portfolioName)}/live-prices`,
+      LIVE_REFRESH_REQUEST_TIMEOUT_MS
+    );
     if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
       return;
     }
@@ -1349,6 +1402,8 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
     // Keep persisted snapshot visible and show a sensible market-state fallback.
     setMarketStateChip(fallbackMarketStateNowET());
     setPortfolioLastUpdatedChip(0);
+  } finally {
+    state.portfolioLiveRefreshInFlight = false;
   }
 }
 
@@ -1367,11 +1422,16 @@ function stopDashboardLiveRefreshTimer() {
 }
 
 async function refreshDashboardWithLivePrices() {
+  if (state.dashboardLiveRefreshInFlight) {
+    return;
+  }
+
+  state.dashboardLiveRefreshInFlight = true;
   const requestSeq = ++state.dashboardRefreshRequestSeq;
   const shouldRenderDashboard = !el.dashboardView.hidden && state.activeView === "dashboard";
 
   try {
-    const payload = await apiGet("/api/live-prices");
+    const payload = await apiGetWithTimeout("/api/live-prices", LIVE_REFRESH_REQUEST_TIMEOUT_MS);
     if (requestSeq < state.dashboardRefreshAppliedSeq) {
       return;
     }
@@ -1452,6 +1512,8 @@ async function refreshDashboardWithLivePrices() {
     }
     setDashboardMarketStateChip(fallbackMarketStateNowET());
     setDashboardLastUpdatedChip(0);
+  } finally {
+    state.dashboardLiveRefreshInFlight = false;
   }
 }
 
