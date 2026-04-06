@@ -543,6 +543,30 @@ function filterPointsByPeriod(points, period) {
   return filtered.length ? filtered : [normalized[normalized.length - 1]];
 }
 
+function previousDistinctDayValue(points, referenceUnix) {
+  const normalized = Array.isArray(points)
+    ? points
+        .map((p) => ({ date: safeNumber(p?.date), value: safeNumber(p?.value) }))
+        .filter((p) => p.date > 0)
+        .sort((a, b) => a.date - b.date)
+    : [];
+
+  if (!normalized.length) {
+    return null;
+  }
+
+  const referenceBucket = Math.floor(safeNumber(referenceUnix) / 86400);
+  for (let i = normalized.length - 1; i >= 0; i -= 1) {
+    const point = normalized[i];
+    const pointBucket = Math.floor(point.date / 86400);
+    if (pointBucket < referenceBucket) {
+      return point.value;
+    }
+  }
+
+  return null;
+}
+
 function computeTrend(points) {
   if (!Array.isArray(points) || points.length < 2) {
     return { hasTrend: false, percentChange: 0 };
@@ -1220,10 +1244,20 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
 
     const shares = safeNumber(stock?.shares_owned);
     const livePositionValue = shares * live.price;
+    const previousClose = safeNumber(stock?.previous_close_price);
+    const dayChangeAmount = Number.isFinite(previousClose) && previousClose > 0
+      ? (live.price - previousClose)
+      : 0;
+    const dayChangePercent = Number.isFinite(previousClose) && previousClose > 0
+      ? (dayChangeAmount / previousClose) * 100
+      : 0;
     return {
       ...stock,
       latest_close_price: live.price,
       latest_close_date: live.asOf,
+      day_change_amount: dayChangeAmount,
+      day_change_percent: dayChangePercent,
+      position_day_change_amount: shares * dayChangeAmount,
       position_market_value: livePositionValue
     };
   });
@@ -1238,6 +1272,13 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
     estimated_total_value: safeNumber(portfolio?.available_capital) + totalPositionValue,
     daily_values: Array.isArray(portfolio?.daily_values) ? [...portfolio.daily_values] : []
   };
+
+  const previousDayValue = previousDistinctDayValue(updatedPortfolio.daily_values, nowTs);
+  if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
+    const dayChangeAmount = updatedPortfolio.estimated_total_value - previousDayValue;
+    updatedPortfolio.day_change_amount = dayChangeAmount;
+    updatedPortfolio.day_change_percent = (dayChangeAmount / previousDayValue) * 100;
+  }
 
   const todayBucket = Math.floor(nowTs / 86400);
   const existingIndex = updatedPortfolio.daily_values.findIndex(
@@ -1382,9 +1423,19 @@ async function refreshDashboardWithLivePrices() {
         dailyValues.push(livePoint);
       }
 
+      const previousDayValue = previousDistinctDayValue(dailyValues, nowTs);
+      let dayChangeAmount = safeNumber(portfolio?.day_change_amount);
+      let dayChangePercent = safeNumber(portfolio?.day_change_percent);
+      if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
+        dayChangeAmount = liveEstimate - previousDayValue;
+        dayChangePercent = (dayChangeAmount / previousDayValue) * 100;
+      }
+
       return {
         ...portfolio,
         estimated_total_value: liveEstimate,
+        day_change_amount: dayChangeAmount,
+        day_change_percent: dayChangePercent,
         daily_values: dailyValues
       };
     });
