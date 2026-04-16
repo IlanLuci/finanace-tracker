@@ -36,12 +36,50 @@ namespace
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
+    constexpr int DAILY_SYNC_RETRY_MINUTES = 15;
     constexpr long long SECONDS_PER_DAY = 86400;
     std::mutex g_data_access_mutex;
 
     long long dayBucketForTimestamp(time_t ts)
     {
         return static_cast<long long>(ts) / SECONDS_PER_DAY;
+    }
+
+    bool isWeekdayBucket(long long day_bucket)
+    {
+        const time_t ts = static_cast<time_t>(day_bucket * SECONDS_PER_DAY);
+        std::tm* local = std::localtime(&ts);
+        if (local == nullptr)
+        {
+            return false;
+        }
+
+        return local->tm_wday >= 1 && local->tm_wday <= 5;
+    }
+
+    long long latestExpectedDailySyncDayLocal(time_t now)
+    {
+        long long day = dayBucketForTimestamp(now);
+        std::tm* local = std::localtime(&now);
+        if (local == nullptr)
+        {
+            return day;
+        }
+
+        const bool before_daily_sync_cutoff =
+            (local->tm_hour < DAILY_SYNC_HOUR_LOCAL) ||
+            (local->tm_hour == DAILY_SYNC_HOUR_LOCAL && local->tm_min < DAILY_SYNC_MINUTE_LOCAL);
+        if (before_daily_sync_cutoff)
+        {
+            --day;
+        }
+
+        while (day > 0 && !isWeekdayBucket(day))
+        {
+            --day;
+        }
+
+        return day;
     }
 
     time_t nextDailySyncTimeLocal(time_t now)
@@ -2988,21 +3026,41 @@ bool PortfolioApiServer::start()
     std::thread(
         [periodic_sync_data_dir]()
         {
+            long long last_synced_day = -1;
+
             while (true)
             {
                 const time_t now = std::time(nullptr);
-                const time_t next_sync = nextDailySyncTimeLocal(now);
-                const auto sleep_seconds =
-                    std::chrono::seconds(std::max<time_t>(1, next_sync - now));
-                std::this_thread::sleep_for(sleep_seconds);
+                const long long target_day = latestExpectedDailySyncDayLocal(now);
+                bool needs_retry = false;
 
-                PortfolioManager sync_manager(periodic_sync_data_dir);
-                const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
-                std::lock_guard<std::mutex> lock(g_data_access_mutex);
-                if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
+                if (target_day > 0 && target_day > last_synced_day)
                 {
-                    std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
+                    PortfolioManager sync_manager(periodic_sync_data_dir);
+                    const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+                    std::lock_guard<std::mutex> lock(g_data_access_mutex);
+                    if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
+                    {
+                        needs_retry = true;
+                        std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
+                    }
+                    else
+                    {
+                        last_synced_day = target_day;
+                    }
                 }
+
+                if (needs_retry)
+                {
+                    std::this_thread::sleep_for(std::chrono::minutes(DAILY_SYNC_RETRY_MINUTES));
+                    continue;
+                }
+
+                const time_t after_sync_now = std::time(nullptr);
+                const time_t next_sync = nextDailySyncTimeLocal(after_sync_now);
+                const auto sleep_seconds =
+                    std::chrono::seconds(std::max<time_t>(1, next_sync - after_sync_now));
+                std::this_thread::sleep_for(sleep_seconds);
             }
         }
     ).detach();
