@@ -37,6 +37,7 @@ namespace
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
     constexpr int DAILY_SYNC_RETRY_MINUTES = 15;
+    constexpr int DAILY_SYNC_POLL_SECONDS = 60;
     constexpr long long SECONDS_PER_DAY = 86400;
     std::mutex g_data_access_mutex;
 
@@ -80,35 +81,6 @@ namespace
         }
 
         return day;
-    }
-
-    time_t nextDailySyncTimeLocal(time_t now)
-    {
-        std::tm local_tm = {};
-        std::tm* local_ptr = std::localtime(&now);
-        if (local_ptr == nullptr)
-        {
-            return now + 24 * 60 * 60;
-        }
-
-        local_tm = *local_ptr;
-        local_tm.tm_hour = DAILY_SYNC_HOUR_LOCAL;
-        local_tm.tm_min = DAILY_SYNC_MINUTE_LOCAL;
-        local_tm.tm_sec = 0;
-
-        time_t scheduled = std::mktime(&local_tm);
-        if (scheduled <= now)
-        {
-            local_tm.tm_mday += 1;
-            scheduled = std::mktime(&local_tm);
-        }
-
-        if (scheduled <= now)
-        {
-            return now + 24 * 60 * 60;
-        }
-
-        return scheduled;
     }
 
     struct HttpRequest
@@ -3022,45 +2994,45 @@ bool PortfolioApiServer::start()
     ).detach();
 
     // Keep daily values current by syncing once per day after market close.
+    // Poll the wall clock on a short interval rather than sleeping for the full
+    // gap until the next scheduled run: std::this_thread::sleep_for is backed by
+    // a monotonic clock that pauses while the host is suspended (laptop asleep),
+    // so a long sleep can fire hours or days after the intended wall-clock time.
     const std::string periodic_sync_data_dir = data_directory;
     std::thread(
         [periodic_sync_data_dir]()
         {
             long long last_synced_day = -1;
+            time_t last_failed_attempt = 0;
 
             while (true)
             {
                 const time_t now = std::time(nullptr);
                 const long long target_day = latestExpectedDailySyncDayLocal(now);
-                bool needs_retry = false;
 
-                if (target_day > 0 && target_day > last_synced_day)
+                const bool sync_due = target_day > 0 && target_day > last_synced_day;
+                const bool retry_cooldown_passed =
+                    last_failed_attempt == 0 ||
+                    (now - last_failed_attempt) >= (DAILY_SYNC_RETRY_MINUTES * 60);
+
+                if (sync_due && retry_cooldown_passed)
                 {
                     PortfolioManager sync_manager(periodic_sync_data_dir);
                     const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
                     std::lock_guard<std::mutex> lock(g_data_access_mutex);
-                    if (!MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
+                    if (MarketDataSync::syncAllPortfolios(sync_manager, sync_config))
                     {
-                        needs_retry = true;
-                        std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
+                        last_synced_day = target_day;
+                        last_failed_attempt = 0;
                     }
                     else
                     {
-                        last_synced_day = target_day;
+                        last_failed_attempt = now;
+                        std::cerr << "Scheduled daily market-data sync completed with errors" << std::endl;
                     }
                 }
 
-                if (needs_retry)
-                {
-                    std::this_thread::sleep_for(std::chrono::minutes(DAILY_SYNC_RETRY_MINUTES));
-                    continue;
-                }
-
-                const time_t after_sync_now = std::time(nullptr);
-                const time_t next_sync = nextDailySyncTimeLocal(after_sync_now);
-                const auto sleep_seconds =
-                    std::chrono::seconds(std::max<time_t>(1, next_sync - after_sync_now));
-                std::this_thread::sleep_for(sleep_seconds);
+                std::this_thread::sleep_for(std::chrono::seconds(DAILY_SYNC_POLL_SECONDS));
             }
         }
     ).detach();
