@@ -165,6 +165,22 @@ function isLiveMarketSession(marketState) {
   return normalized === "REGULAR" || normalized === "PRE" || normalized === "POST";
 }
 
+function isMarketOpen(marketState) {
+  return normalizeMarketState(marketState) === "REGULAR";
+}
+
+function effectiveLiveMarketState() {
+  return state.liveMarketState && state.liveMarketState !== "UNKNOWN"
+    ? state.liveMarketState
+    : fallbackMarketStateNowET();
+}
+
+function effectiveDashboardMarketState() {
+  return state.dashboardMarketState && state.dashboardMarketState !== "UNKNOWN"
+    ? state.dashboardMarketState
+    : fallbackMarketStateNowET();
+}
+
 function resolveMarketState(payload) {
   const entries = Array.isArray(payload?.prices) ? payload.prices : [];
   for (const entry of entries) {
@@ -860,7 +876,8 @@ function allocationPalette(size) {
   return Array.from({ length: Math.max(size, 0) }, (_, index) => themePalette[index % themePalette.length]);
 }
 
-function renderTransactionTable(transactions) {
+function renderTransactionTable(transactions, options = {}) {
+  const { showNotes = false } = options;
   if (!transactions.length) {
     return "<p>No transactions yet.</p>";
   }
@@ -870,18 +887,24 @@ function renderTransactionTable(transactions) {
       const amountClass = tx.amount >= 0 ? "positive" : "negative";
       const symbol = tx.stock_symbol ? tx.stock_symbol : "-";
       const shares = tx.shares ? sharesFormat(tx.shares) : "-";
-      const notes = tx.notes || "-";
+      const isSell = String(tx.type || "").toUpperCase() === "SELL_STOCK" || String(tx.type || "").toUpperCase() === "SELL";
+      const hasProfit = isSell && Number.isFinite(tx.realized_profit);
+      const profitMarkup = hasProfit
+        ? ` <span class="${tx.realized_profit >= 0 ? "positive" : "negative"}">(${tx.realized_profit >= 0 ? "+" : ""}${currency(tx.realized_profit)})</span>`
+        : "";
+      const notesCell = showNotes ? `<td>${tx.notes || "-"}</td>` : "";
       return `<tr>
         <td>${dateLabel(tx.date)}</td>
-        <td>${typeLabel(tx.type)}</td>
+        <td>${typeLabel(tx.type)}${profitMarkup}</td>
         <td>${symbol}</td>
         <td>${shares}</td>
         <td class="${amountClass}">${currency(tx.amount)}</td>
-        <td>${notes}</td>
+        ${notesCell}
       </tr>`;
     })
     .join("");
 
+  const notesHeader = showNotes ? "<th>Notes</th>" : "";
   return `<table class="tx-table"><thead>
     <tr>
       <th>Date</th>
@@ -889,7 +912,7 @@ function renderTransactionTable(transactions) {
       <th>Ticker</th>
       <th>Shares</th>
       <th>Amount</th>
-      <th>Notes</th>
+      ${notesHeader}
     </tr>
   </thead><tbody>${rows}</tbody></table>`;
 }
@@ -906,7 +929,6 @@ function renderDashboard() {
   const previousTotalAssets = totalAssets - totalDayChange;
   const totalDayChangePercent = previousTotalAssets > 0 ? (totalDayChange / previousTotalAssets) * 100 : 0;
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
-  const totalTransactions = accountPortfolios.reduce((sum, p) => sum + (p.transaction_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
 
   const dashboardMetrics = `<section class="metric-grid">
@@ -914,7 +936,6 @@ function renderDashboard() {
     ${metricCard("Day Change", signedCurrency(totalDayChange), `${percentage(totalDayChangePercent)} vs previous close`)}
     ${metricCard("Total Available Cash", currency(totalCash), "Across account portfolios")}
     ${metricCard("Total Stock Positions", String(totalStocks), "Account positions only")}
-    ${metricCard("Total Transactions", String(totalTransactions), "Account transaction history")}
   </section>`;
 
   const cards = portfolios
@@ -926,7 +947,6 @@ function renderDashboard() {
         </div>
         ${isWatchlistPortfolio(p)
           ? `<div class="sub">Watchlist only</div>
-             <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
              <div class="sub">${p.stock_count} symbols tracked</div>`
            : `<div>${currency(p.estimated_total_value)}</div>
              <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
@@ -1074,36 +1094,45 @@ function renderAllocationChart(stocks, portfolio) {
 
 function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const watchlist = isWatchlistPortfolio(portfolio);
+  const visibleStocks = watchlist
+    ? stocks
+    : stocks.filter((stock) => safeNumber(stock?.shares_owned) > 0);
 
   el.portfolioName.textContent = portfolioDisplayName(portfolio.name);
   el.portfolioType.textContent = typeLabel(portfolio.type);
   el.stockCount.textContent = watchlist
-    ? `${stocks.length} symbol${stocks.length === 1 ? "" : "s"}`
-    : `${stocks.length} stock${stocks.length === 1 ? "" : "s"}`;
+    ? `${visibleStocks.length} symbol${visibleStocks.length === 1 ? "" : "s"}`
+    : `${visibleStocks.length} stock${visibleStocks.length === 1 ? "" : "s"}`;
 
   el.addWatchlistSymbolBtn.hidden = !watchlist;
   el.addWatchlistSymbolBtn.onclick = watchlist ? () => addWatchlistSymbol() : null;
 
+  const marketOpen = isMarketOpen(effectiveLiveMarketState());
+
   if (watchlist) {
-    el.portfolioMetrics.innerHTML = [
-      metricCard("Tracked Symbols", String(stocks.length), "No transaction ledger"),
-      metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
-      metricCard("Transactions", "Disabled", "Watchlist mode"),
-      metricCard("Account Totals", "Excluded", "Not included in portfolio totals"),
-      metricCard("Initial Capital", "Not Applicable", "Watchlists do not hold cash")
-    ].join("");
+    el.portfolioMetrics.innerHTML = "";
+    el.portfolioMetrics.hidden = true;
   } else {
+    el.portfolioMetrics.hidden = false;
     const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
     el.portfolioMetrics.innerHTML = [
-      metricCard("Estimated Total", currency(portfolio.estimated_total_value)),
+      metricCard("Total", currency(portfolio.estimated_total_value)),
       metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
       metricCard("Available Capital", currency(portfolio.available_capital)),
-      metricCard("Reported Total", currency(portfolio.reported_total_value)),
       metricCard("Position Value", currency(valueDelta), `${portfolio.transaction_count} transactions`)
     ].join("");
   }
 
-  const sortedStocks = [...stocks].sort((a, b) => (b.position_market_value || 0) - (a.position_market_value || 0));
+  const recentTransactionsPanel = el.recentTransactions?.closest(".panel");
+  const splitContainer = el.recentTransactions?.closest(".split");
+  if (recentTransactionsPanel) {
+    recentTransactionsPanel.hidden = watchlist;
+  }
+  if (splitContainer) {
+    splitContainer.classList.toggle("split-single", watchlist);
+  }
+
+  const sortedStocks = [...visibleStocks].sort((a, b) => (b.position_market_value || 0) - (a.position_market_value || 0));
   el.stocksList.innerHTML = sortedStocks
     .map(
       (stock) => {
@@ -1116,7 +1145,12 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
         if (watchlist) {
           const latestTs = safeNumber(stock.latest_close_date);
-          const toneClass = stockDayChangeToneClass(stock.day_change_amount);
+          const toneClass = marketOpen
+            ? stockDayChangeToneClass(stock.day_change_amount)
+            : "stock-card-neutral";
+          const dayChangeLine = marketOpen
+            ? `<span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>`
+            : "";
           return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
         <div class="stock-top">
           <strong>${stock.ticker}</strong>
@@ -1125,14 +1159,13 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
         <div class="stock-name">${stock.company_name || "Watchlist symbol"}</div>
         <div class="stock-stats">
           <span>Latest Price: ${currency(stock.latest_close_price)}</span>
-          <span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>
+          ${dayChangeLine}
           <span>As Of: ${latestTs ? dateLabel(latestTs) : "n/a"}</span>
           <span>Click for actions</span>
         </div>
       </article>`;
         }
 
-        const perShareLabel = `${performance.perShareChange >= 0 ? "+" : ""}${currency(performance.perShareChange)} per share`;
         const totalLabel = `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`;
 
         return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
@@ -1145,10 +1178,8 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
         <div class="stock-stats">
           <span>Shares: ${sharesFormat(stock.shares_owned)}</span>
           <span>Avg Cost: ${currency(stock.average_purchase_price)}</span>
-          <span>Latest Close: ${currency(stock.latest_close_price)} on ${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</span>
           <span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>
           <span>Position Day Change: ${signedCurrency(stock.position_day_change_amount)}</span>
-          <span>${perShareLabel}</span>
         </div>
       </article>`;
       }
@@ -1261,6 +1292,7 @@ function priceMapFromPayload(payload) {
 
 function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
   const nowTs = unixNow();
+  const todayBucket = Math.floor(nowTs / 86400);
   const watchlist = isWatchlistPortfolio(portfolio);
   const updatedStocks = (Array.isArray(stocks) ? stocks : []).map((stock) => {
     const ticker = String(stock?.ticker || "").trim().toUpperCase();
@@ -1271,17 +1303,27 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
 
     const shares = safeNumber(stock?.shares_owned);
     const livePositionValue = watchlist ? live.price : shares * live.price;
+    // Pick the prior trading session's close. If the stored "latest" close is from a previous
+    // day, it IS the prior session close. If it's already from today (intraday persisted live
+    // quote), fall back to the explicit previous_close_price.
+    const latestClose = safeNumber(stock?.latest_close_price);
+    const latestCloseDate = safeNumber(stock?.latest_close_date);
     const previousClose = safeNumber(stock?.previous_close_price);
-    const dayChangeAmount = Number.isFinite(previousClose) && previousClose > 0
-      ? (live.price - previousClose)
+    const latestBucket = Math.floor(latestCloseDate / 86400);
+    const priorSessionClose = (latestClose > 0 && latestBucket > 0 && latestBucket < todayBucket)
+      ? latestClose
+      : previousClose;
+    const dayChangeAmount = Number.isFinite(priorSessionClose) && priorSessionClose > 0
+      ? (live.price - priorSessionClose)
       : 0;
-    const dayChangePercent = Number.isFinite(previousClose) && previousClose > 0
-      ? (dayChangeAmount / previousClose) * 100
+    const dayChangePercent = Number.isFinite(priorSessionClose) && priorSessionClose > 0
+      ? (dayChangeAmount / priorSessionClose) * 100
       : 0;
     return {
       ...stock,
       latest_close_price: live.price,
       latest_close_date: live.asOf,
+      previous_close_price: priorSessionClose,
       day_change_amount: dayChangeAmount,
       day_change_percent: dayChangePercent,
       position_day_change_amount: watchlist ? dayChangeAmount : shares * dayChangeAmount,
@@ -1324,7 +1366,6 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
     }
   }
 
-  const todayBucket = Math.floor(nowTs / 86400);
   const existingIndex = updatedPortfolio.daily_values.findIndex(
     (point) => Math.floor(safeNumber(point?.date) / 86400) === todayBucket
   );
@@ -1604,11 +1645,12 @@ function showStockDialog(stock) {
       <div class="dialog-table-wrap">
         ${events.length ? renderTransactionTable(events.map((e) => ({
           date: e.date,
-          type: e.type,
+          type: e.type === "SELL" ? "SELL_STOCK" : (e.type === "BUY" ? "BUY_STOCK" : e.type),
           stock_symbol: stock.ticker,
           shares: e.shares,
           amount: e.cash_amount,
-          notes: e.notes || ""
+          notes: e.notes || "",
+          realized_profit: e.realized_profit
         }))) : "<p>No recent events available.</p>"}
       </div>
     </article>
@@ -1827,7 +1869,7 @@ async function showAllTransactions() {
 
   try {
     const payload = await apiGet(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions`);
-    el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [])}</div>`;
+    el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [], { showNotes: true })}</div>`;
     el.transactionsDialog.showModal();
   } catch (error) {
     showFlash(error.message);

@@ -1403,45 +1403,107 @@ namespace
         return out.str();
     }
 
-    std::string serializeTransaction(const Transaction& tx)
-    {
-        std::ostringstream out;
-        out << "{"
-            << "\"date\":" << static_cast<long long>(tx.date) << ","
-            << "\"amount\":" << jsonNumber(tx.amount) << ","
-            << "\"type\":" << jsonString(transactionTypeToString(tx.type)) << ","
-            << "\"stock_symbol\":" << jsonString(tx.stock_symbol) << ","
-            << "\"shares\":" << jsonNumber(tx.shares) << ","
-            << "\"notes\":" << jsonString(tx.notes)
-            << "}";
-        return out.str();
-    }
-
     std::string serializeTransactions(std::vector<Transaction> txs, int limit)
     {
+        // Compute realized profit per SELL_STOCK by walking transactions in chronological order
+        // and tracking running per-ticker share count and cost basis.
+        std::vector<size_t> ascending_order;
+        ascending_order.reserve(txs.size());
+        for (size_t i = 0; i < txs.size(); ++i)
+        {
+            ascending_order.push_back(i);
+        }
         std::sort(
-            txs.begin(),
-            txs.end(),
-            [](const Transaction& lhs, const Transaction& rhs)
+            ascending_order.begin(),
+            ascending_order.end(),
+            [&txs](size_t a, size_t b)
             {
-                return lhs.date > rhs.date;
+                return txs[a].date < txs[b].date;
             }
         );
 
-        if (limit > 0 && static_cast<size_t>(limit) < txs.size())
+        struct Lot { double shares = 0.0; double total_cost = 0.0; };
+        std::map<std::string, Lot> lots;
+        std::map<size_t, double> profit_by_index;
+        for (size_t idx : ascending_order)
         {
-            txs.resize(static_cast<size_t>(limit));
+            const Transaction& tx = txs[idx];
+            if (tx.stock_symbol.empty())
+            {
+                continue;
+            }
+            const std::string ticker = upperCopy(tx.stock_symbol);
+            Lot& lot = lots[ticker];
+            if (tx.type == TransactionType::BUY_STOCK)
+            {
+                lot.shares += tx.shares;
+                lot.total_cost += -tx.amount; // amount is negative for buys
+            }
+            else if (tx.type == TransactionType::SELL_STOCK)
+            {
+                const double avg_cost = lot.shares > 0.0 ? lot.total_cost / lot.shares : 0.0;
+                const double cost_basis = avg_cost * tx.shares;
+                profit_by_index[idx] = tx.amount - cost_basis;
+                lot.shares -= tx.shares;
+                if (lot.shares <= 1e-9)
+                {
+                    lot.shares = 0.0;
+                    lot.total_cost = 0.0;
+                }
+                else
+                {
+                    lot.total_cost -= cost_basis;
+                    if (lot.total_cost < 0.0)
+                    {
+                        lot.total_cost = 0.0;
+                    }
+                }
+            }
+        }
+
+        std::vector<size_t> descending_order;
+        descending_order.reserve(txs.size());
+        for (size_t i = 0; i < txs.size(); ++i)
+        {
+            descending_order.push_back(i);
+        }
+        std::sort(
+            descending_order.begin(),
+            descending_order.end(),
+            [&txs](size_t a, size_t b)
+            {
+                return txs[a].date > txs[b].date;
+            }
+        );
+
+        if (limit > 0 && static_cast<size_t>(limit) < descending_order.size())
+        {
+            descending_order.resize(static_cast<size_t>(limit));
         }
 
         std::ostringstream out;
         out << "[";
-        for (size_t i = 0; i < txs.size(); ++i)
+        for (size_t k = 0; k < descending_order.size(); ++k)
         {
-            if (i > 0)
+            if (k > 0)
             {
                 out << ",";
             }
-            out << serializeTransaction(txs[i]);
+            const size_t idx = descending_order[k];
+            const Transaction& tx = txs[idx];
+            out << "{"
+                << "\"date\":" << static_cast<long long>(tx.date) << ","
+                << "\"amount\":" << jsonNumber(tx.amount) << ","
+                << "\"type\":" << jsonString(transactionTypeToString(tx.type)) << ","
+                << "\"stock_symbol\":" << jsonString(tx.stock_symbol) << ","
+                << "\"shares\":" << jsonNumber(tx.shares) << ","
+                << "\"notes\":" << jsonString(tx.notes);
+            auto profit_it = profit_by_index.find(idx);
+            if (profit_it != profit_by_index.end())
+            {
+                out << ",\"realized_profit\":" << jsonNumber(profit_it->second);
+            }
+            out << "}";
         }
         out << "]";
         return out.str();
@@ -1890,37 +1952,92 @@ namespace
                 << "\"event_count\":" << stock.getEvents().size() << ","
                 << "\"recent_events\":";
 
-            std::vector<StockEvent> sorted_events = stock.getEvents();
+            std::vector<StockEvent> all_events = stock.getEvents();
             std::sort(
-                sorted_events.begin(),
-                sorted_events.end(),
+                all_events.begin(),
+                all_events.end(),
                 [](const StockEvent& lhs, const StockEvent& rhs)
                 {
-                    return lhs.date > rhs.date;
+                    return lhs.date < rhs.date;
                 }
             );
-            if (sorted_events.size() > 5)
+
+            std::map<size_t, double> event_profit_by_index;
+            double running_shares = 0.0;
+            double running_cost = 0.0;
+            for (size_t i = 0; i < all_events.size(); ++i)
             {
-                sorted_events.resize(5);
+                const StockEvent& event = all_events[i];
+                if (event.type == StockEventType::BUY)
+                {
+                    running_shares += event.shares;
+                    running_cost += event.shares * event.price_per_share;
+                }
+                else if (event.type == StockEventType::SELL)
+                {
+                    const double avg_cost = running_shares > 0.0 ? running_cost / running_shares : 0.0;
+                    const double cost_basis = avg_cost * event.shares;
+                    const double proceeds = event.shares * event.price_per_share;
+                    event_profit_by_index[i] = proceeds - cost_basis;
+                    running_shares -= event.shares;
+                    if (running_shares <= 1e-9)
+                    {
+                        running_shares = 0.0;
+                        running_cost = 0.0;
+                    }
+                    else
+                    {
+                        running_cost -= cost_basis;
+                        if (running_cost < 0.0)
+                        {
+                            running_cost = 0.0;
+                        }
+                    }
+                }
+            }
+
+            std::vector<size_t> descending_event_order;
+            descending_event_order.reserve(all_events.size());
+            for (size_t i = 0; i < all_events.size(); ++i)
+            {
+                descending_event_order.push_back(i);
+            }
+            std::sort(
+                descending_event_order.begin(),
+                descending_event_order.end(),
+                [&all_events](size_t a, size_t b)
+                {
+                    return all_events[a].date > all_events[b].date;
+                }
+            );
+            if (descending_event_order.size() > 5)
+            {
+                descending_event_order.resize(5);
             }
 
             out << "[";
-            for (size_t i = 0; i < sorted_events.size(); ++i)
+            for (size_t k = 0; k < descending_event_order.size(); ++k)
             {
-                if (i > 0)
+                if (k > 0)
                 {
                     out << ",";
                 }
 
-                const auto& event = sorted_events[i];
+                const size_t idx = descending_event_order[k];
+                const StockEvent& event = all_events[idx];
                 out << "{"
                     << "\"date\":" << static_cast<long long>(event.date) << ","
                     << "\"type\":" << jsonString(stockEventTypeToString(event.type)) << ","
                     << "\"shares\":" << jsonNumber(event.shares) << ","
                     << "\"price_per_share\":" << jsonNumber(event.price_per_share) << ","
                     << "\"cash_amount\":" << jsonNumber(event.cash_amount) << ","
-                    << "\"notes\":" << jsonString(event.notes)
-                    << "}";
+                    << "\"notes\":" << jsonString(event.notes);
+                auto profit_it = event_profit_by_index.find(idx);
+                if (profit_it != event_profit_by_index.end())
+                {
+                    out << ",\"realized_profit\":" << jsonNumber(profit_it->second);
+                }
+                out << "}";
             }
             out << "]";
             out << "}";
