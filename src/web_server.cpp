@@ -752,8 +752,9 @@ namespace
         return true;
     }
 
+    // Tuple layout: <regular_market_price, regular_market_time, market_state, regular_market_open>
     bool fetchYahooLiveQuotes(const std::vector<std::string>& symbols,
-                              std::map<std::string, std::tuple<double, time_t, std::string>>& out_quotes,
+                              std::map<std::string, std::tuple<double, time_t, std::string, double>>& out_quotes,
                               std::string& error)
     {
         out_quotes.clear();
@@ -995,7 +996,13 @@ namespace
                         market_state = normalizeMarketState(market_state);
                     }
 
-                    out_quotes[symbol] = std::make_tuple(market_price, market_time, market_state);
+                    double market_open = 0.0;
+                    if (!parseJsonNumberField(chart_response, "regularMarketOpen", market_open) || !std::isfinite(market_open) || market_open <= 0.0)
+                    {
+                        market_open = 0.0;
+                    }
+
+                    out_quotes[symbol] = std::make_tuple(market_price, market_time, market_state, market_open);
                     ++fallback_success_count;
                 }
 
@@ -1074,7 +1081,18 @@ namespace
                 }
             }
 
-            out_quotes[symbol] = std::make_tuple(price, market_time, market_state);
+            double market_open = 0.0;
+            auto market_open_it = entry.object_value.find("regularMarketOpen");
+            if (market_open_it != entry.object_value.end() && market_open_it->second.type == JsonType::NUMBER)
+            {
+                const double parsed_open = market_open_it->second.number_value;
+                if (std::isfinite(parsed_open) && parsed_open > 0.0)
+                {
+                    market_open = parsed_open;
+                }
+            }
+
+            out_quotes[symbol] = std::make_tuple(price, market_time, market_state, market_open);
         }
 
         return true;
@@ -1092,7 +1110,7 @@ namespace
             return false;
         }
 
-        std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+        std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
         std::string quote_error;
         if (!fetchYahooLiveQuotes({normalized_ticker}, quotes, quote_error))
         {
@@ -2446,7 +2464,7 @@ namespace
                 tickers.push_back(entry.first);
             }
 
-            std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+            std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
             std::string quote_error;
             if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
             {
@@ -2645,7 +2663,7 @@ namespace
                 }
 
                 const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
-                std::map<std::string, std::tuple<double, time_t, std::string>> quotes;
+                std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
                 std::string quote_error;
                 if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
                 {
@@ -2678,6 +2696,7 @@ namespace
                     const double quote_price = std::get<0>(quote_it->second);
                     const time_t quote_as_of = std::get<1>(quote_it->second);
                     const std::string quote_state = std::get<2>(quote_it->second);
+                    const double quote_open = std::get<3>(quote_it->second);
 
                     if (quote_state == "REGULAR")
                     {
@@ -2692,6 +2711,7 @@ namespace
                     out << "{"
                         << "\"ticker\":" << jsonString(normalized) << ","
                         << "\"price\":" << jsonNumber(quote_price) << ","
+                        << "\"open\":" << jsonNumber(quote_open) << ","
                         << "\"as_of\":" << static_cast<long long>(quote_as_of) << ","
                         << "\"market_state\":" << jsonString(quote_state)
                         << "}";

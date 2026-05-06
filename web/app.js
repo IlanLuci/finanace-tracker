@@ -26,7 +26,8 @@ const state = {
     dashboard: null,
     portfolio: null,
     allocation: null
-  }
+  },
+  stocksSort: { key: null, dir: null }
 };
 
 const el = {
@@ -1092,6 +1093,74 @@ function renderAllocationChart(stocks, portfolio) {
   );
 }
 
+function enrichStockRow(stock) {
+  const perf = stockPerformance(stock);
+  return {
+    ticker: String(stock?.ticker || ""),
+    company_name: String(stock?.company_name || ""),
+    shares_owned: safeNumber(stock?.shares_owned),
+    average_purchase_price: safeNumber(stock?.average_purchase_price),
+    latest_close_price: safeNumber(stock?.latest_close_price),
+    day_change_amount: safeNumber(stock?.day_change_amount),
+    day_change_percent: safeNumber(stock?.day_change_percent),
+    position_day_change_amount: safeNumber(stock?.position_day_change_amount),
+    position_market_value: safeNumber(stock?.position_market_value),
+    latest_close_date: safeNumber(stock?.latest_close_date),
+    totalChange: perf.totalChange,
+    percentChange: perf.percentChange,
+    hasBasis: perf.hasBasis,
+    isZeroCostBasisPosition: perf.isZeroCostBasisPosition,
+    _stock: stock
+  };
+}
+
+function sortStockRows(rows, sort) {
+  if (!sort?.key) return rows;
+  const dir = sort.dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = a[sort.key];
+    const vb = b[sort.key];
+    if (typeof va === "string" || typeof vb === "string") {
+      return String(va || "").localeCompare(String(vb || "")) * dir;
+    }
+    return ((va ?? 0) - (vb ?? 0)) * dir;
+  });
+}
+
+function pnlCellTone(value, hasBasis = true) {
+  if (!hasBasis) return "stock-card-neutral";
+  if (value > 0.0001) return "stock-card-positive";
+  if (value < -0.0001) return "stock-card-negative";
+  return "stock-card-neutral";
+}
+
+function holdingsTableColumns() {
+  return [
+    { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
+    { key: "company_name", label: "Company", align: "left", render: (r) => `<td class="company">${r.company_name}</td>` },
+    { key: "shares_owned", label: "Shares", align: "right", render: (r) => `<td class="num">${sharesFormat(r.shares_owned)}</td>` },
+    { key: "average_purchase_price", label: "Avg Cost", align: "right", render: (r) => `<td class="num">${currency(r.average_purchase_price)}</td>` },
+    { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
+    { key: "day_change_amount", label: "Day Δ$", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_amount)}">${signedCurrency(r.day_change_amount)}</td>` },
+    { key: "day_change_percent", label: "Day Δ%", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_percent)}">${percentage(r.day_change_percent)}</td>` },
+    { key: "position_day_change_amount", label: "Pos Day Δ", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.position_day_change_amount)}">${signedCurrency(r.position_day_change_amount)}</td>` },
+    { key: "position_market_value", label: "Mkt Value", align: "right", render: (r) => `<td class="num"><strong>${currency(r.position_market_value)}</strong></td>` },
+    { key: "totalChange", label: "Total P/L", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.totalChange, r.hasBasis)}">${r.hasBasis ? signedCurrency(r.totalChange) : "—"}</td>` },
+    { key: "percentChange", label: "Total %", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.percentChange, r.hasBasis)}">${r.hasBasis ? percentage(r.percentChange) : "—"}</td>` }
+  ];
+}
+
+function watchlistTableColumns() {
+  return [
+    { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
+    { key: "company_name", label: "Company", align: "left", render: (r) => `<td class="company">${r.company_name}</td>` },
+    { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
+    { key: "day_change_amount", label: "Day Δ$", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_amount)}">${signedCurrency(r.day_change_amount)}</td>` },
+    { key: "day_change_percent", label: "Day Δ%", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_percent)}">${percentage(r.day_change_percent)}</td>` },
+    { key: "latest_close_date", label: "As Of", align: "right", render: (r) => `<td class="num">${r.latest_close_date ? dateLabel(r.latest_close_date) : "n/a"}</td>` }
+  ];
+}
+
 function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const watchlist = isWatchlistPortfolio(portfolio);
   const visibleStocks = watchlist
@@ -1124,71 +1193,67 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   }
 
   const recentTransactionsPanel = el.recentTransactions?.closest(".panel");
-  const splitContainer = el.recentTransactions?.closest(".split");
   if (recentTransactionsPanel) {
     recentTransactionsPanel.hidden = watchlist;
   }
-  if (splitContainer) {
-    splitContainer.classList.toggle("split-single", watchlist);
+
+  const columns = watchlist ? watchlistTableColumns() : holdingsTableColumns();
+  if (!state.stocksSort.key || !columns.find((c) => c.key === state.stocksSort.key)) {
+    state.stocksSort = watchlist
+      ? { key: "ticker", dir: "asc" }
+      : { key: "position_market_value", dir: "desc" };
   }
 
-  const sortedStocks = [...visibleStocks].sort((a, b) => (b.position_market_value || 0) - (a.position_market_value || 0));
-  el.stocksList.innerHTML = sortedStocks
-    .map(
-      (stock) => {
-        const performance = stockPerformance(stock);
-        const toneClass = stockToneClass(
-          performance.totalChange,
-          performance.hasBasis,
-          performance.isZeroCostBasisPosition
-        );
+  const enriched = visibleStocks.map((stock) => enrichStockRow(stock));
+  const sortedRows = sortStockRows(enriched, state.stocksSort);
 
-        if (watchlist) {
-          const latestTs = safeNumber(stock.latest_close_date);
-          const toneClass = marketOpen
-            ? stockDayChangeToneClass(stock.day_change_amount)
-            : "stock-card-neutral";
-          const dayChangeLine = marketOpen
-            ? `<span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>`
-            : "";
-          return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
-        <div class="stock-top">
-          <strong>${stock.ticker}</strong>
-          <span class="stock-market-value">${currency(stock.latest_close_price)}</span>
-        </div>
-        <div class="stock-name">${stock.company_name || "Watchlist symbol"}</div>
-        <div class="stock-stats">
-          <span>Latest Price: ${currency(stock.latest_close_price)}</span>
-          ${dayChangeLine}
-          <span>As Of: ${latestTs ? dateLabel(latestTs) : "n/a"}</span>
-          <span>Click for actions</span>
-        </div>
-      </article>`;
-        }
+  const headerHTML = columns
+    .map((col) => {
+      const active = state.stocksSort.key === col.key;
+      const arrow = active ? (state.stocksSort.dir === "asc" ? "▲" : "▼") : "";
+      const cls = [
+        col.align === "right" ? "num" : "",
+        active ? "sorted" : ""
+      ].filter(Boolean).join(" ");
+      return `<th class="${cls}" data-key="${col.key}">${col.label}<span class="sort-arrow">${arrow}</span></th>`;
+    })
+    .join("");
 
-        const totalLabel = `${performance.totalChange >= 0 ? "+" : ""}${currency(performance.totalChange)}`;
+  let bodyHTML;
+  if (sortedRows.length === 0) {
+    bodyHTML = `<tr><td colspan="${columns.length}" class="empty">No stock data available.</td></tr>`;
+  } else {
+    bodyHTML = sortedRows
+      .map((row) => {
+        const stock = row._stock;
+        const tone = watchlist
+          ? (marketOpen ? stockDayChangeToneClass(stock.day_change_amount) : "stock-card-neutral")
+          : stockToneClass(row.totalChange, row.hasBasis, row.isZeroCostBasisPosition);
+        const cells = columns.map((col) => col.render(row)).join("");
+        return `<tr class="stock-row ${tone}" data-ticker="${stock.ticker}">${cells}</tr>`;
+      })
+      .join("");
+  }
 
-        return `<article class="stock-card ${toneClass} fade-up" data-ticker="${stock.ticker}">
-        <div class="stock-top">
-          <strong>${stock.ticker}</strong>
-          <span class="stock-market-value">${currency(stock.position_market_value)}</span>
-        </div>
-        <div class="stock-name">${stock.company_name || "Company name not available"}</div>
-        <div class="stock-pnl ${toneClass}">${totalLabel} <span>${performance.hasBasis ? `${performance.percentChange >= 0 ? "+" : ""}${performance.percentChange.toFixed(2)}%` : "No cost basis"}</span></div>
-        <div class="stock-stats">
-          <span>Shares: ${sharesFormat(stock.shares_owned)}</span>
-          <span>Avg Cost: ${currency(stock.average_purchase_price)}</span>
-          <span>Day Change: ${changeLabel(stock.day_change_amount, stock.day_change_percent)}</span>
-          <span>Position Day Change: ${signedCurrency(stock.position_day_change_amount)}</span>
-        </div>
-      </article>`;
+  el.stocksList.innerHTML = `<table class="stocks-table"><thead><tr>${headerHTML}</tr></thead><tbody>${bodyHTML}</tbody></table>`;
+
+  el.stocksList.querySelectorAll("thead th").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (!key) return;
+      if (state.stocksSort.key === key) {
+        state.stocksSort.dir = state.stocksSort.dir === "asc" ? "desc" : "asc";
+      } else {
+        state.stocksSort.key = key;
+        state.stocksSort.dir = (key === "ticker" || key === "company_name") ? "asc" : "desc";
       }
-    )
-    .join("") || "<p>No stock data available.</p>";
+      renderPortfolioDetail(portfolio, stocks, recentTransactions);
+    });
+  });
 
-  document.querySelectorAll(".stock-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      const ticker = card.dataset.ticker;
+  el.stocksList.querySelectorAll(".stock-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const ticker = row.dataset.ticker;
       const selected = stocks.find((s) => s.ticker === ticker);
       if (selected) {
         showStockDialog(selected);
@@ -1277,6 +1342,7 @@ function priceMapFromPayload(payload) {
   entries.forEach((entry) => {
     const ticker = String(entry?.ticker || "").trim().toUpperCase();
     const price = safeNumber(entry?.price);
+    const open = safeNumber(entry?.open);
     const asOf = safeNumber(entry?.as_of);
     if (!ticker || price <= 0) {
       return;
@@ -1284,6 +1350,7 @@ function priceMapFromPayload(payload) {
 
     byTicker.set(ticker, {
       price,
+      open: open > 0 ? open : 0,
       asOf: asOf > 0 ? asOf : unixNow()
     });
   });
@@ -1303,9 +1370,10 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
 
     const shares = safeNumber(stock?.shares_owned);
     const livePositionValue = watchlist ? live.price : shares * live.price;
-    // Pick the prior trading session's close. If the stored "latest" close is from a previous
-    // day, it IS the prior session close. If it's already from today (intraday persisted live
-    // quote), fall back to the explicit previous_close_price.
+    // Day change is the move since today's regular-session open. Yahoo's quote provides
+    // regularMarketOpen on every payload (including pre/post sessions, where it reflects the
+    // most recent regular session's open). Fall back to the prior session close only if the
+    // open is missing — that keeps the metric defined when the open isn't reported yet.
     const latestClose = safeNumber(stock?.latest_close_price);
     const latestCloseDate = safeNumber(stock?.latest_close_date);
     const previousClose = safeNumber(stock?.previous_close_price);
@@ -1313,17 +1381,19 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
     const priorSessionClose = (latestClose > 0 && latestBucket > 0 && latestBucket < todayBucket)
       ? latestClose
       : previousClose;
-    const dayChangeAmount = Number.isFinite(priorSessionClose) && priorSessionClose > 0
-      ? (live.price - priorSessionClose)
+    const dayChangeBaseline = live.open > 0 ? live.open : priorSessionClose;
+    const dayChangeAmount = Number.isFinite(dayChangeBaseline) && dayChangeBaseline > 0
+      ? (live.price - dayChangeBaseline)
       : 0;
-    const dayChangePercent = Number.isFinite(priorSessionClose) && priorSessionClose > 0
-      ? (dayChangeAmount / priorSessionClose) * 100
+    const dayChangePercent = Number.isFinite(dayChangeBaseline) && dayChangeBaseline > 0
+      ? (dayChangeAmount / dayChangeBaseline) * 100
       : 0;
     return {
       ...stock,
       latest_close_price: live.price,
       latest_close_date: live.asOf,
       previous_close_price: priorSessionClose,
+      day_change_baseline: Number.isFinite(dayChangeBaseline) && dayChangeBaseline > 0 ? dayChangeBaseline : 0,
       day_change_amount: dayChangeAmount,
       day_change_percent: dayChangePercent,
       position_day_change_amount: watchlist ? dayChangeAmount : shares * dayChangeAmount,
@@ -1345,8 +1415,8 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
   };
 
   if (watchlist) {
-    const previousCloseTotal = updatedStocks.reduce(
-      (sum, stock) => sum + safeNumber(stock?.previous_close_price),
+    const baselineTotal = updatedStocks.reduce(
+      (sum, stock) => sum + safeNumber(stock?.day_change_baseline),
       0
     );
     const dayChangeAmount = updatedStocks.reduce(
@@ -1354,8 +1424,8 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
       0
     );
     updatedPortfolio.day_change_amount = dayChangeAmount;
-    updatedPortfolio.day_change_percent = previousCloseTotal > 0
-      ? (dayChangeAmount / previousCloseTotal) * 100
+    updatedPortfolio.day_change_percent = baselineTotal > 0
+      ? (dayChangeAmount / baselineTotal) * 100
       : 0;
   } else {
     const previousDayValue = previousDistinctDayValue(updatedPortfolio.daily_values, nowTs);
@@ -1671,6 +1741,7 @@ async function openPortfolio(name) {
     state.currentPortfolio = portfolio;
     state.currentStocks = normalizeStocks(stocksPayload.stocks || []);
     state.recentTransactions = recentPayload.transactions || [];
+    state.stocksSort = { key: null, dir: null };
 
     setActiveView("portfolio");
 
