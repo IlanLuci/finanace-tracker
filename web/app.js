@@ -625,10 +625,10 @@ function computeTrend(points) {
 
 function trendColor(percentChange) {
   if (percentChange > 0.0001) {
-    return "#1b8b68";
+    return "#60d394";
   }
   if (percentChange < -0.0001) {
-    return "#c34b3d";
+    return "#ee6055";
   }
   return "#6a7a76";
 }
@@ -787,7 +787,8 @@ function createLineChart(canvas, points, label, color) {
       scales: {
         x: {
           ticks: {
-            maxTicksLimit: 6
+            maxTicksLimit: 6,
+            color: "#555"
           },
           grid: {
             display: false
@@ -795,10 +796,11 @@ function createLineChart(canvas, points, label, color) {
         },
         y: {
           ticks: {
-            callback: (v) => compactCurrency(v)
+            callback: (v) => compactCurrency(v),
+            color: "#555"
           },
           grid: {
-            color: "rgba(70, 90, 80, 0.12)"
+            color: "rgba(34, 34, 34, 0.08)"
           }
         }
       }
@@ -819,7 +821,7 @@ function createPieChart(canvas, labels, values, colors) {
         {
           data: values,
           backgroundColor: colors,
-          borderColor: "rgba(15, 20, 25, 0.82)",
+          borderColor: "#222",
           borderWidth: 1,
           hoverOffset: 8
         }
@@ -832,13 +834,13 @@ function createPieChart(canvas, labels, values, colors) {
         legend: {
           position: "right",
           labels: {
-            color: "#d9e1ec",
+            color: "#222",
             usePointStyle: true,
             boxWidth: 10,
             boxHeight: 10,
             font: {
               size: 12,
-              weight: "600"
+              weight: "500"
             }
           }
         },
@@ -860,18 +862,18 @@ function createPieChart(canvas, labels, values, colors) {
 
 function allocationPalette(size) {
   const themePalette = [
-    "#3b82f6",
-    "#10b981",
-    "#f59e0b",
-    "#60a5fa",
-    "#34d399",
-    "#fbbf24",
-    "#1d4ed8",
-    "#059669",
+    "#3695c8",
+    "#60d394",
+    "#ee6055",
+    "#f5b04d",
+    "#9c89b8",
+    "#1b8b68",
+    "#c34b3d",
+    "#2d6da3",
+    "#a86bca",
     "#d97706",
-    "#93c5fd",
-    "#6ee7b7",
-    "#fcd34d"
+    "#34a08c",
+    "#8a6dbf"
   ];
 
   return Array.from({ length: Math.max(size, 0) }, (_, index) => themePalette[index % themePalette.length]);
