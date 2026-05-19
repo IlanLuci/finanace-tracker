@@ -214,6 +214,11 @@ p {
   cursor: pointer;
 }
 
+.chart-tools .graph-period-select {
+  width: auto;
+  flex-shrink: 0;
+}
+
 .chip {
   font-size: 10pt;
   padding: 3px 8px;
@@ -283,12 +288,23 @@ p {
   cursor: pointer;
   transition: background-color 0.06s;
   white-space: nowrap;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  box-shadow: none;
+  line-height: 1.2;
 }
 
 .primary-btn:hover,
 .ghost-btn:hover {
   background: var(--hover);
   color: var(--ink);
+}
+
+.primary-btn:focus,
+.ghost-btn:focus {
+  outline: 1px solid var(--select);
+  outline-offset: -2px;
 }
 
 #viewAllTransactionsBtn {

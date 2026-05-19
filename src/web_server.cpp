@@ -1098,6 +1098,68 @@ namespace
         return true;
     }
 
+    struct LiveQuoteCacheEntry
+    {
+        std::tuple<double, time_t, std::string, double> quote;
+        time_t cached_at;
+    };
+
+    std::mutex g_live_quote_cache_mutex;
+    std::map<std::string, LiveQuoteCacheEntry> g_live_quote_cache;
+    constexpr time_t LIVE_QUOTE_CACHE_TTL_SECONDS = 30;
+
+    bool fetchLiveQuotesCached(const std::vector<std::string>& symbols,
+                               std::map<std::string, std::tuple<double, time_t, std::string, double>>& out_quotes,
+                               std::string& error)
+    {
+        out_quotes.clear();
+
+        std::lock_guard<std::mutex> lock(g_live_quote_cache_mutex);
+        const time_t check_time = std::time(nullptr);
+
+        std::vector<std::string> tickers_to_fetch;
+        tickers_to_fetch.reserve(symbols.size());
+
+        for (const std::string& raw : symbols)
+        {
+            const std::string normalized = upperCopy(trim(raw));
+            if (normalized.empty())
+            {
+                continue;
+            }
+            auto cached_it = g_live_quote_cache.find(normalized);
+            if (cached_it != g_live_quote_cache.end() &&
+                (check_time - cached_it->second.cached_at) <= LIVE_QUOTE_CACHE_TTL_SECONDS)
+            {
+                out_quotes[normalized] = cached_it->second.quote;
+            }
+            else
+            {
+                tickers_to_fetch.push_back(normalized);
+            }
+        }
+
+        if (tickers_to_fetch.empty())
+        {
+            return true;
+        }
+
+        std::map<std::string, std::tuple<double, time_t, std::string, double>> fresh;
+        if (!fetchYahooLiveQuotes(tickers_to_fetch, fresh, error))
+        {
+            return false;
+        }
+
+        const time_t fetched_at = std::time(nullptr);
+        for (const auto& entry : fresh)
+        {
+            g_live_quote_cache[entry.first] = LiveQuoteCacheEntry{entry.second, fetched_at};
+            out_quotes[entry.first] = entry.second;
+        }
+
+        return true;
+    }
+
     bool persistLiveQuoteForTicker(PortfolioManager& manager,
                                    const std::string& portfolio_name,
                                    const std::string& ticker,
@@ -2466,7 +2528,7 @@ namespace
 
             std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
             std::string quote_error;
-            if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
+            if (!fetchLiveQuotesCached(tickers, quotes, quote_error))
             {
                 return makeJsonResponse(502, makeErrorBody("Failed to fetch live prices: " + quote_error));
             }
@@ -2665,7 +2727,7 @@ namespace
                 const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
                 std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
                 std::string quote_error;
-                if (!fetchYahooLiveQuotes(tickers, quotes, quote_error))
+                if (!fetchLiveQuotesCached(tickers, quotes, quote_error))
                 {
                     return makeJsonResponse(502, makeErrorBody("Failed to fetch live prices: " + quote_error));
                 }
@@ -3110,8 +3172,6 @@ bool PortfolioApiServer::start()
         return false;
     }
 
-    PortfolioManager manager(data_directory);
-
     std::cout << "Portfolio API server listening on http://localhost:" << port << std::endl;
     std::cout << "Data directory: " << data_directory << std::endl;
 
@@ -3174,6 +3234,7 @@ bool PortfolioApiServer::start()
         }
     ).detach();
 
+    const std::string connection_data_dir = data_directory;
     while (true)
     {
         sockaddr_in client_address;
@@ -3185,40 +3246,47 @@ bool PortfolioApiServer::start()
             continue;
         }
 
-        auto raw_request = readHttpMessage(client_fd);
-        HttpResponse response;
-        if (!raw_request.has_value())
-        {
-            response = makeJsonResponse(400, makeErrorBody("Failed to parse HTTP request"));
-        }
-        else
-        {
-            auto request = parseHttpRequest(raw_request.value());
-            if (!request.has_value())
+        std::thread(
+            [client_fd, connection_data_dir]()
             {
-                response = makeJsonResponse(400, makeErrorBody("Malformed HTTP request"));
-            }
-            else
-            {
-                const HttpRequest& parsed_request = request.value();
-                const bool is_read_only =
-                    parsed_request.method == "GET" || parsed_request.method == "OPTIONS";
+                PortfolioManager manager(connection_data_dir);
 
-                if (is_read_only)
+                auto raw_request = readHttpMessage(client_fd);
+                HttpResponse response;
+                if (!raw_request.has_value())
                 {
-                    response = routeRequest(parsed_request, manager);
+                    response = makeJsonResponse(400, makeErrorBody("Failed to parse HTTP request"));
                 }
                 else
                 {
-                    std::lock_guard<std::mutex> lock(g_data_access_mutex);
-                    response = routeRequest(parsed_request, manager);
-                }
-            }
-        }
+                    auto request = parseHttpRequest(raw_request.value());
+                    if (!request.has_value())
+                    {
+                        response = makeJsonResponse(400, makeErrorBody("Malformed HTTP request"));
+                    }
+                    else
+                    {
+                        const HttpRequest& parsed_request = request.value();
+                        const bool is_read_only =
+                            parsed_request.method == "GET" || parsed_request.method == "OPTIONS";
 
-        const std::string payload = makeHttpResponseText(response);
-        sendAll(client_fd, payload);
-        close(client_fd);
+                        if (is_read_only)
+                        {
+                            response = routeRequest(parsed_request, manager);
+                        }
+                        else
+                        {
+                            std::lock_guard<std::mutex> lock(g_data_access_mutex);
+                            response = routeRequest(parsed_request, manager);
+                        }
+                    }
+                }
+
+                const std::string payload = makeHttpResponseText(response);
+                sendAll(client_fd, payload);
+                close(client_fd);
+            }
+        ).detach();
     }
 
     close(server_fd);
