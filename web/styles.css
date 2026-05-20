@@ -302,9 +302,9 @@ p {
 }
 
 .primary-btn:focus,
-.ghost-btn:focus {
-  outline: 1px solid var(--select);
-  outline-offset: -2px;
+.ghost-btn:focus,
+.breadcrumbs button:focus {
+  outline: none;
 }
 
 #viewAllTransactionsBtn {

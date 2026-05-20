@@ -684,16 +684,6 @@ function stockToneClass(totalChange, hasBasis, isZeroCostBasisPosition = false) 
   return "stock-card-neutral";
 }
 
-function stockDayChangeToneClass(dayChangeAmount) {
-  if (dayChangeAmount > 0.0001) {
-    return "stock-card-positive";
-  }
-  if (dayChangeAmount < -0.0001) {
-    return "stock-card-negative";
-  }
-  return "stock-card-neutral";
-}
-
 function isWatchlistPortfolio(portfolio) {
   return String(portfolio?.type || "").toUpperCase() === "WATCHLIST";
 }
@@ -741,6 +731,19 @@ function destroyChart(name) {
   }
 }
 
+const themeTooltipStyle = {
+  backgroundColor: "#f5f5f5",
+  titleColor: "#222",
+  bodyColor: "#222",
+  borderColor: "#222",
+  borderWidth: 1,
+  cornerRadius: 0,
+  displayColors: false,
+  padding: 10,
+  titleFont: { family: '"Noto Serif", Georgia, serif', weight: "500", size: 12 },
+  bodyFont: { family: '"Noto Serif", Georgia, serif', weight: "400", size: 12 }
+};
+
 function createLineChart(canvas, points, label, color) {
   if (!canvas || !window.Chart) {
     return null;
@@ -779,6 +782,7 @@ function createLineChart(canvas, points, label, color) {
           display: false
         },
         tooltip: {
+          ...themeTooltipStyle,
           callbacks: {
             label: (ctx) => currency(ctx.parsed.y)
           }
@@ -845,6 +849,7 @@ function createPieChart(canvas, labels, values, colors) {
           }
         },
         tooltip: {
+          ...themeTooltipStyle,
           callbacks: {
             label: (ctx) => {
               const dataset = ctx.dataset?.data || [];
@@ -1157,8 +1162,6 @@ function watchlistTableColumns() {
     { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
     { key: "company_name", label: "Company", align: "left", render: (r) => `<td class="company">${r.company_name}</td>` },
     { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
-    { key: "day_change_amount", label: "Day Δ$", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_amount)}">${signedCurrency(r.day_change_amount)}</td>` },
-    { key: "day_change_percent", label: "Day Δ%", align: "right", render: (r) => `<td class="num ${pnlCellTone(r.day_change_percent)}">${percentage(r.day_change_percent)}</td>` },
     { key: "latest_close_date", label: "As Of", align: "right", render: (r) => `<td class="num">${r.latest_close_date ? dateLabel(r.latest_close_date) : "n/a"}</td>` }
   ];
 }
@@ -1177,8 +1180,6 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
   el.addWatchlistSymbolBtn.hidden = !watchlist;
   el.addWatchlistSymbolBtn.onclick = watchlist ? () => addWatchlistSymbol() : null;
-
-  const marketOpen = isMarketOpen(effectiveLiveMarketState());
 
   if (watchlist) {
     el.portfolioMetrics.innerHTML = "";
@@ -1229,7 +1230,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
       .map((row) => {
         const stock = row._stock;
         const tone = watchlist
-          ? (marketOpen ? stockDayChangeToneClass(stock.day_change_amount) : "stock-card-neutral")
+          ? "stock-card-neutral"
           : stockToneClass(row.totalChange, row.hasBasis, row.isZeroCostBasisPosition);
         const cells = columns.map((col) => col.render(row)).join("");
         return `<tr class="stock-row ${tone}" data-ticker="${stock.ticker}">${cells}</tr>`;
