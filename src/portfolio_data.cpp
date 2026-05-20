@@ -63,12 +63,12 @@ namespace
 
     bool isValidPortfolioType(uint8_t type_byte)
     {
-        return type_byte <= static_cast<uint8_t>(PortfolioType::WATCHLIST);
+        return type_byte <= static_cast<uint8_t>(PortfolioType::CRYPTO);
     }
 
     bool isValidTransactionType(uint8_t type_byte)
     {
-        return type_byte <= static_cast<uint8_t>(TransactionType::INTEREST);
+        return type_byte <= static_cast<uint8_t>(TransactionType::TRANSFER_OUT_ASSET);
     }
 
     bool isValidStockEventType(uint8_t type_byte)
@@ -438,7 +438,9 @@ namespace
     {
         return tx_type == TransactionType::BUY_STOCK ||
                tx_type == TransactionType::SELL_STOCK ||
-               tx_type == TransactionType::DIVIDEND;
+               tx_type == TransactionType::DIVIDEND ||
+               tx_type == TransactionType::TRANSFER_IN_ASSET ||
+               tx_type == TransactionType::TRANSFER_OUT_ASSET;
     }
 
     StockEventType toStockEventType(TransactionType tx_type)
@@ -446,8 +448,10 @@ namespace
         switch (tx_type)
         {
             case TransactionType::BUY_STOCK:
+            case TransactionType::TRANSFER_IN_ASSET:
                 return StockEventType::BUY;
             case TransactionType::SELL_STOCK:
+            case TransactionType::TRANSFER_OUT_ASSET:
                 return StockEventType::SELL;
             case TransactionType::DIVIDEND:
                 return StockEventType::DIVIDEND;
@@ -571,6 +575,10 @@ double Portfolio::getCapitalMovement(time_t start_date, time_t end_date) const
                 case TransactionType::WITHDRAWAL:
                 case TransactionType::BUY_STOCK:
                     movement -= normalizedCashAmount(transaction.amount);
+                    break;
+                case TransactionType::TRANSFER_IN_ASSET:
+                case TransactionType::TRANSFER_OUT_ASSET:
+                    // No cash movement; amount represents cost basis, not cash flow.
                     break;
             }
         }
@@ -1403,9 +1411,10 @@ bool PortfolioManager::savePortfolio(const std::string& name, const Portfolio& p
     const std::string filepath = getPortfolioFilePath(name);
     const std::string stocks_dir = getStocksDirectoryPath(name);
 
-    // WATCHLIST portfolios intentionally manage stock files outside of
-    // transaction-derived reconciliation; do not prune symbols on save.
-    if (portfolio.getType() == PortfolioType::WATCHLIST)
+    // WATCHLIST manages stock files outside transaction-derived reconciliation;
+    // CASH portfolios hold no stocks at all. In both cases skip the stocks dir.
+    if (portfolio.getType() == PortfolioType::WATCHLIST ||
+        portfolio.getType() == PortfolioType::CASH)
     {
         return portfolio.saveToFile(filepath);
     }
@@ -1438,7 +1447,10 @@ bool PortfolioManager::savePortfolio(const std::string& name, const Portfolio& p
             return false;
         }
 
-        if (tx.type == TransactionType::BUY_STOCK || tx.type == TransactionType::SELL_STOCK)
+        if (tx.type == TransactionType::BUY_STOCK ||
+            tx.type == TransactionType::SELL_STOCK ||
+            tx.type == TransactionType::TRANSFER_IN_ASSET ||
+            tx.type == TransactionType::TRANSFER_OUT_ASSET)
         {
             if (tx.shares <= 0.0)
             {

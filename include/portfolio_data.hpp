@@ -12,7 +12,9 @@ enum class PortfolioType : uint8_t
     BROKERAGE = 0,
     ROTH_IRA = 1,
     TRADITIONAL_IRA = 2,
-    WATCHLIST = 3
+    WATCHLIST = 3,
+    CASH = 4,
+    CRYPTO = 5
 };
 
 // Daily portfolio value record
@@ -29,12 +31,14 @@ struct DailyPortfolioValue
 // Transaction record types - impacts on available cash
 enum class TransactionType : uint8_t
 {
-    DEPOSIT = 0,           // Add cash to portfolio
-    WITHDRAWAL = 1,        // Remove cash from portfolio
-    BUY_STOCK = 2,         // Purchase stock (reduces cash)
-    SELL_STOCK = 3,        // Sell stock (increases cash)
-    DIVIDEND = 4,          // Dividend payment (increases cash)
-    INTEREST = 5           // Interest payment (increases cash)
+    DEPOSIT = 0,             // Add cash to portfolio
+    WITHDRAWAL = 1,          // Remove cash from portfolio
+    BUY_STOCK = 2,           // Purchase stock (reduces cash)
+    SELL_STOCK = 3,          // Sell stock (increases cash)
+    DIVIDEND = 4,            // Dividend payment (increases cash)
+    INTEREST = 5,            // Interest payment (increases cash)
+    TRANSFER_IN_ASSET = 6,   // Receive an asset from outside (no cash impact; amount = cost basis)
+    TRANSFER_OUT_ASSET = 7   // Send an asset out (no cash impact)
 };
 
 // Stock-specific event types

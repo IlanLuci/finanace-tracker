@@ -1,5 +1,225 @@
 const API_STORAGE_KEY = "portfolio-api-base";
 const CURRENT_PORTFOLIO_KEY = "portfolio-current";
+const PINNED_ACCOUNTS_KEY = "portfolio-pinned-accounts";
+const ACCOUNT_FILTER_KEY = "portfolio-account-filter";
+
+const TYPE_SORT_ORDER = ["BROKERAGE", "ROTH_IRA", "TRADITIONAL_IRA", "CRYPTO", "CASH", "WATCHLIST"];
+
+function getPinnedAccounts() {
+  try {
+    const raw = localStorage.getItem(PINNED_ACCOUNTS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function setPinnedAccounts(set) {
+  localStorage.setItem(PINNED_ACCOUNTS_KEY, JSON.stringify(Array.from(set)));
+}
+
+function isAccountPinned(name) {
+  return getPinnedAccounts().has(String(name));
+}
+
+function togglePinnedAccount(name) {
+  const set = getPinnedAccounts();
+  const key = String(name);
+  if (set.has(key)) {
+    set.delete(key);
+  } else {
+    set.add(key);
+  }
+  setPinnedAccounts(set);
+}
+
+function getAccountFilter() {
+  return localStorage.getItem(ACCOUNT_FILTER_KEY) || "ALL";
+}
+
+function setAccountFilter(value) {
+  if (!value || value === "ALL") {
+    localStorage.removeItem(ACCOUNT_FILTER_KEY);
+  } else {
+    localStorage.setItem(ACCOUNT_FILTER_KEY, String(value).toUpperCase());
+  }
+}
+
+function renderMonthlyActivity(portfolios, allTransactions) {
+  const rows = computeMonthlyActivity(portfolios, allTransactions);
+  if (rows.length === 0) {
+    return `<article class="panel"><div class="panel-head"><h3>Monthly Activity</h3></div>
+      <p class="sub">No monthly activity yet.</p></article>`;
+  }
+
+  const showAll = !!state.monthlyShowAll;
+  const visibleCount = showAll ? rows.length : Math.min(12, rows.length);
+  const visibleRows = rows.slice(0, visibleCount);
+
+  // Group consecutive rows by year so we can insert YEAR TOTAL rows below
+  // each fully-shown December (or below the oldest row in that year on screen).
+  const yearTotals = new Map();
+  rows.forEach((r) => {
+    const t = yearTotals.get(r.year) || { cash: 0, investment: 0, total: 0 };
+    t.cash += r.cashDelta;
+    t.investment += r.investmentDelta;
+    t.total += r.totalDelta;
+    yearTotals.set(r.year, t);
+  });
+
+  const monthLabel = (year, month) => {
+    const d = new Date(Date.UTC(year, month - 1, 1));
+    return d.toLocaleString(undefined, { month: "short", year: "numeric", timeZone: "UTC" });
+  };
+
+  const cell = (value) => `<td class="num ${pnlCellTone(value, value !== 0)}">${signedCurrency(value)}</td>`;
+
+  const currentYear = new Date().getUTCFullYear();
+  const bodyRows = [];
+  for (let i = 0; i < visibleRows.length; i += 1) {
+    const r = visibleRows[i];
+    bodyRows.push(
+      `<tr><td>${monthLabel(r.year, r.month)}</td>${cell(r.cashDelta)}${cell(r.investmentDelta)}${cell(r.totalDelta)}</tr>`
+    );
+    const yearComplete = r.year < currentYear;
+    const isLastInYear = (i === visibleRows.length - 1) || visibleRows[i + 1].year !== r.year;
+    if (yearComplete && isLastInYear && r.month === 1) {
+      const yt = yearTotals.get(r.year);
+      if (yt) {
+        bodyRows.push(
+          `<tr class="monthly-year-total"><td><strong>${r.year} Total</strong></td>${cell(yt.cash)}${cell(yt.investment)}${cell(yt.total)}</tr>`
+        );
+      }
+    }
+  }
+
+  const toggle = rows.length > 12
+    ? `<button id="monthlyToggleBtn" class="ghost-btn" type="button">${showAll ? "Show last 12 months" : "View more"}</button>`
+    : "";
+
+  return `<article class="panel">
+    <div class="panel-head">
+      <h3>Monthly Activity</h3>
+      ${toggle}
+    </div>
+    <div class="stocks-table-wrap">
+      <table class="tx-table">
+        <thead><tr><th>Month</th><th class="num">Cash Δ</th><th class="num">Investment Δ</th><th class="num">Total Δ</th></tr></thead>
+        <tbody>${bodyRows.join("")}</tbody>
+      </table>
+    </div>
+  </article>`;
+}
+
+function monthKey(year, month) {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function monthKeyFromUnix(unixSeconds) {
+  const d = new Date(safeNumber(unixSeconds) * 1000);
+  return monthKey(d.getUTCFullYear(), d.getUTCMonth() + 1);
+}
+
+function lastDayValueByMonth(points) {
+  const byMonth = new Map();
+  (Array.isArray(points) ? points : []).forEach((p) => {
+    const date = safeNumber(p?.date);
+    if (date <= 0) return;
+    const key = monthKeyFromUnix(date);
+    const prev = byMonth.get(key);
+    if (!prev || date > prev.date) {
+      byMonth.set(key, { date, value: safeNumber(p?.value) });
+    }
+  });
+  return byMonth;
+}
+
+function computeMonthlyActivity(portfolios, allTransactions) {
+  const accountPortfolios = portfolios.filter((p) => !isWatchlistPortfolio(p));
+  const aggregateTrend = mergeDailySeries(accountPortfolios);
+  const monthEndValues = lastDayValueByMonth(aggregateTrend);
+
+  const cashByMonth = new Map();
+  accountPortfolios.forEach((p) => {
+    const txs = (allTransactions || {})[p.name] || [];
+    txs.forEach((tx) => {
+      const type = String(tx?.type || "").toUpperCase();
+      if (type !== "DEPOSIT" && type !== "WITHDRAWAL") return;
+      const date = safeNumber(tx?.date);
+      if (date <= 0) return;
+      const key = monthKeyFromUnix(date);
+      cashByMonth.set(key, (cashByMonth.get(key) || 0) + safeNumber(tx?.amount));
+    });
+  });
+
+  const monthKeys = new Set([...monthEndValues.keys(), ...cashByMonth.keys()]);
+  const sortedKeys = Array.from(monthKeys).sort();
+
+  let priorEnd = 0;
+  const rows = sortedKeys.map((key) => {
+    const endEntry = monthEndValues.get(key);
+    const endValue = endEntry ? endEntry.value : priorEnd;
+    const totalDelta = endValue - priorEnd;
+    const cashDelta = cashByMonth.get(key) || 0;
+    const investmentDelta = totalDelta - cashDelta;
+    const [yearStr, monthStr] = key.split("-");
+    priorEnd = endValue;
+    return {
+      key,
+      year: Number(yearStr),
+      month: Number(monthStr),
+      cashDelta,
+      investmentDelta,
+      totalDelta
+    };
+  });
+
+  return rows.reverse(); // newest first
+}
+
+async function refreshAllTransactionsForDashboard() {
+  const accountPortfolios = (state.portfolios || []).filter((p) => !isWatchlistPortfolio(p));
+  const results = await Promise.all(
+    accountPortfolios.map(async (p) => {
+      try {
+        const payload = await apiGet(`/api/portfolios/${encodeURIComponent(p.name)}/transactions`);
+        return [p.name, Array.isArray(payload?.transactions) ? payload.transactions : []];
+      } catch (_) {
+        return [p.name, []];
+      }
+    })
+  );
+  const next = {};
+  results.forEach(([name, txs]) => {
+    next[name] = txs;
+  });
+  state.allTransactions = next;
+  renderDashboard();
+}
+
+function filterAccountsByType(portfolios, filter) {
+  if (!filter || filter === "ALL") return portfolios;
+  const target = String(filter).toUpperCase();
+  return portfolios.filter((p) => String(p.type || "").toUpperCase() === target);
+}
+
+function sortAccountsForDashboard(portfolios) {
+  const pinned = getPinnedAccounts();
+  const typeRank = (type) => {
+    const idx = TYPE_SORT_ORDER.indexOf(String(type || "").toUpperCase());
+    return idx === -1 ? TYPE_SORT_ORDER.length : idx;
+  };
+  return portfolios.slice().sort((a, b) => {
+    const aPinned = pinned.has(String(a.name)) ? 0 : 1;
+    const bPinned = pinned.has(String(b.name)) ? 0 : 1;
+    if (aPinned !== bPinned) return aPinned - bPinned;
+    const rankDiff = typeRank(a.type) - typeRank(b.type);
+    if (rankDiff !== 0) return rankDiff;
+    return portfolioDisplayName(a.name).localeCompare(portfolioDisplayName(b.name));
+  });
+}
 
 const state = {
   apiBase: localStorage.getItem(API_STORAGE_KEY) || "",
@@ -27,7 +247,9 @@ const state = {
     portfolio: null,
     allocation: null
   },
-  stocksSort: { key: null, dir: null }
+  stocksSort: { key: null, dir: null },
+  allTransactions: {},
+  monthlyShowAll: false
 };
 
 const el = {
@@ -688,6 +910,14 @@ function isWatchlistPortfolio(portfolio) {
   return String(portfolio?.type || "").toUpperCase() === "WATCHLIST";
 }
 
+function isCashPortfolio(portfolio) {
+  return String(portfolio?.type || "").toUpperCase() === "CASH";
+}
+
+function isCryptoPortfolio(portfolio) {
+  return String(portfolio?.type || "").toUpperCase() === "CRYPTO";
+}
+
 function periodSelectMarkup(selectId, selectedPeriod) {
   const options = PERIOD_OPTIONS
     .map((period) => `<option value="${period}"${period === selectedPeriod ? " selected" : ""}>${period}</option>`)
@@ -933,43 +1163,88 @@ function renderDashboard() {
 
   const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
   const totalCash = accountPortfolios.reduce((sum, p) => sum + (p.available_capital || 0), 0);
-  const totalDayChange = accountPortfolios.reduce((sum, p) => sum + (p.day_change_amount || 0), 0);
-  const previousTotalAssets = totalAssets - totalDayChange;
-  const totalDayChangePercent = previousTotalAssets > 0 ? (totalDayChange / previousTotalAssets) * 100 : 0;
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
+  // Day Change tracks the chart: live total vs. the most recent prior-day
+  // snapshot. This includes deposits/withdrawals/transfers, matching what
+  // the line on the dashboard chart reflects.
+  const nowTs = Math.floor(Date.now() / 1000);
+  const previousDayTotal = previousDistinctDayValue(aggregateTrend, nowTs);
+  const totalDayChange = (Number.isFinite(previousDayTotal) && previousDayTotal !== null)
+    ? totalAssets - previousDayTotal
+    : 0;
+  const totalDayChangePercent = (Number.isFinite(previousDayTotal) && previousDayTotal > 0)
+    ? (totalDayChange / previousDayTotal) * 100
+    : 0;
 
   const dashboardMetrics = `<section class="metric-grid">
     ${metricCard("Total Assets", currency(totalAssets), `${accountPortfolios.length} account portfolio${accountPortfolios.length === 1 ? "" : "s"}`)}
     ${metricCard("Day Change", signedCurrency(totalDayChange), `${percentage(totalDayChangePercent)} vs previous close`)}
     ${metricCard("Total Available Cash", currency(totalCash), "Across account portfolios")}
-    ${metricCard("Total Stock Positions", String(totalStocks), "Account positions only")}
+    ${metricCard("Total Positions", String(totalStocks), "Stocks and crypto across accounts")}
   </section>`;
 
-  const cards = portfolios
-    .map(
-      (p, i) => `<article class="portfolio-card fade-up" data-name="${encodeURIComponent(p.name)}" style="animation-delay:${Math.min(i * 60, 360)}ms">
-        <div class="stock-top">
+  const currentFilter = getAccountFilter();
+  const filteredPortfolios = filterAccountsByType(portfolios, currentFilter);
+  const visiblePortfolios = sortAccountsForDashboard(filteredPortfolios);
+
+  const filterOptions = [
+    { value: "ALL", label: "All Types" },
+    { value: "BROKERAGE", label: "Brokerage" },
+    { value: "ROTH_IRA", label: "Roth IRA" },
+    { value: "TRADITIONAL_IRA", label: "Traditional IRA" },
+    { value: "CRYPTO", label: "Crypto" },
+    { value: "CASH", label: "Cash" },
+    { value: "WATCHLIST", label: "Watchlist" }
+  ];
+  const filterMarkup = `<select id="accountFilterSelect" class="graph-period-select" aria-label="Filter accounts by type">${
+    filterOptions
+      .map((opt) => `<option value="${opt.value}"${opt.value === currentFilter ? " selected" : ""}>${opt.label}</option>`)
+      .join("")
+  }</select>`;
+
+  const cards = visiblePortfolios
+    .map((p, i) => {
+      const animation = `style="animation-delay:${Math.min(i * 60, 360)}ms"`;
+      const pinned = isAccountPinned(p.name);
+      const pinIcon = pinned ? "★" : "☆";
+      const pinTitle = pinned ? "Unpin" : "Pin to top";
+      const header = `<div class="stock-top">
           <strong>${portfolioDisplayName(p.name)}</strong>
-          <span class="chip">${typeLabel(p.type)}</span>
-        </div>
-        ${isWatchlistPortfolio(p)
-          ? `<div class="sub">Watchlist only</div>
-             <div class="sub">${p.stock_count} symbols tracked</div>`
-           : `<div>${currency(p.estimated_total_value)}</div>
-             <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
-             <div class="sub">Cash: ${currency(p.available_capital)}</div>
-             <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>`}
-      </article>`
-    )
+          <span class="card-header-right">
+            <span class="chip">${typeLabel(p.type)}</span>
+            <button type="button" class="pin-btn${pinned ? " is-pinned" : ""}" data-pin-name="${encodeURIComponent(p.name)}" title="${pinTitle}" aria-label="${pinTitle}">${pinIcon}</button>
+          </span>
+        </div>`;
+      let body;
+      if (isWatchlistPortfolio(p)) {
+        body = `<div class="sub">Watchlist only</div>
+                <div class="sub">${p.stock_count} symbols tracked</div>`;
+      } else if (isCashPortfolio(p)) {
+        body = `<div>${currency(p.available_capital)}</div>
+                <div class="sub">${p.transaction_count} transaction${p.transaction_count === 1 ? "" : "s"}</div>`;
+      } else {
+        body = `<div>${currency(p.estimated_total_value)}</div>
+                <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
+                <div class="sub">Cash: ${currency(p.available_capital)}</div>
+                <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>`;
+      }
+      return `<article class="portfolio-card fade-up" data-name="${encodeURIComponent(p.name)}" ${animation}>
+        ${header}
+        ${body}
+      </article>`;
+    })
     .join("");
 
-  const emptyState = `
-    <article class="panel empty-state fade-up">
-      <h3>No Portfolio Data Yet</h3>
-      <p>Portfolio records were not found or could not be read. Create a portfolio in the backend, then refresh.</p>
-    </article>
-  `;
+  const emptyState = currentFilter !== "ALL"
+    ? `<article class="panel empty-state fade-up">
+        <h3>No accounts match this filter</h3>
+        <p>Pick a different type from the dropdown or choose "All Types".</p>
+      </article>`
+    : `<article class="panel empty-state fade-up">
+        <h3>No Account Data Yet</h3>
+        <p>No accounts found. Click "New Account" to create one.</p>
+      </article>`;
 
   const chartHostId = "dashboardChart";
   el.dashboardView.innerHTML = `
@@ -988,11 +1263,15 @@ function renderDashboard() {
     </article>
     <section>
       <div class="panel-head">
-        <h3>Portfolios</h3>
-        <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Portfolio</button>
+        <h3>Accounts</h3>
+        <div class="chart-tools">
+          ${filterMarkup}
+          <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Account</button>
+        </div>
       </div>
       ${cards ? `<div class="dashboard-cards">${cards}</div>` : emptyState}
     </section>
+    ${renderMonthlyActivity(portfolios, state.allTransactions)}
   `;
 
   const openPortfolioCreateDialogBtn = document.getElementById("openPortfolioCreateDialogBtn");
@@ -1000,12 +1279,41 @@ function renderDashboard() {
     openPortfolioCreateDialogBtn.addEventListener("click", openCreatePortfolioDialog);
   }
 
+  const accountFilterSelect = document.getElementById("accountFilterSelect");
+  if (accountFilterSelect) {
+    accountFilterSelect.addEventListener("change", (event) => {
+      setAccountFilter(event.target.value);
+      renderDashboard();
+    });
+  }
+
   document.querySelectorAll(".portfolio-card").forEach((card) => {
-    card.addEventListener("click", () => {
+    card.addEventListener("click", (event) => {
+      if (event.target.closest(".pin-btn")) {
+        return;
+      }
       const portfolioName = decodeURIComponent(card.dataset.name || "");
       openPortfolio(portfolioName);
     });
   });
+
+  document.querySelectorAll(".pin-btn").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const name = decodeURIComponent(btn.dataset.pinName || "");
+      if (!name) return;
+      togglePinnedAccount(name);
+      renderDashboard();
+    });
+  });
+
+  const monthlyToggleBtn = document.getElementById("monthlyToggleBtn");
+  if (monthlyToggleBtn) {
+    monthlyToggleBtn.addEventListener("click", () => {
+      state.monthlyShowAll = !state.monthlyShowAll;
+      renderDashboard();
+    });
+  }
 
   destroyChart("dashboard");
   const chartCanvas = document.getElementById(chartHostId);
@@ -1168,15 +1476,29 @@ function watchlistTableColumns() {
 
 function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const watchlist = isWatchlistPortfolio(portfolio);
+  const cash = isCashPortfolio(portfolio);
+  const crypto = isCryptoPortfolio(portfolio);
+  const holdingNoun = crypto ? "coin" : (watchlist ? "symbol" : "stock");
   const visibleStocks = watchlist
     ? stocks
     : stocks.filter((stock) => safeNumber(stock?.shares_owned) > 0);
 
   el.portfolioName.textContent = portfolioDisplayName(portfolio.name);
   el.portfolioType.textContent = typeLabel(portfolio.type);
-  el.stockCount.textContent = watchlist
-    ? `${visibleStocks.length} symbol${visibleStocks.length === 1 ? "" : "s"}`
-    : `${visibleStocks.length} stock${visibleStocks.length === 1 ? "" : "s"}`;
+  if (cash) {
+    el.stockCount.textContent = `${portfolio.transaction_count || 0} transaction${(portfolio.transaction_count || 0) === 1 ? "" : "s"}`;
+  } else {
+    el.stockCount.textContent = `${visibleStocks.length} ${holdingNoun}${visibleStocks.length === 1 ? "" : "s"}`;
+  }
+
+  const stocksHeading = document.getElementById("stocksPanelHeading");
+  if (stocksHeading) {
+    stocksHeading.textContent = crypto ? "Crypto Holdings" : (watchlist ? "Watchlist" : "Holdings");
+  }
+  const allocationHeading = document.getElementById("allocationPanelHeading");
+  if (allocationHeading) {
+    allocationHeading.textContent = crypto ? "Crypto Allocation" : "Allocation";
+  }
 
   el.addWatchlistSymbolBtn.hidden = !watchlist;
   el.addWatchlistSymbolBtn.onclick = watchlist ? () => addWatchlistSymbol() : null;
@@ -1184,6 +1506,13 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   if (watchlist) {
     el.portfolioMetrics.innerHTML = "";
     el.portfolioMetrics.hidden = true;
+  } else if (cash) {
+    el.portfolioMetrics.hidden = false;
+    el.portfolioMetrics.innerHTML = [
+      metricCard("Current Balance", currency(portfolio.available_capital)),
+      metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
+      metricCard("Transactions", String(portfolio.transaction_count || 0))
+    ].join("");
   } else {
     el.portfolioMetrics.hidden = false;
     const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
@@ -1200,69 +1529,76 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     recentTransactionsPanel.hidden = watchlist;
   }
 
-  const columns = watchlist ? watchlistTableColumns() : holdingsTableColumns();
-  if (!state.stocksSort.key || !columns.find((c) => c.key === state.stocksSort.key)) {
-    state.stocksSort = watchlist
-      ? { key: "ticker", dir: "asc" }
-      : { key: "position_market_value", dir: "desc" };
+  const stocksPanel = el.stocksList?.closest(".panel");
+  if (stocksPanel) {
+    stocksPanel.hidden = cash;
   }
 
-  const enriched = visibleStocks.map((stock) => enrichStockRow(stock));
-  const sortedRows = sortStockRows(enriched, state.stocksSort);
+  if (!cash) {
+    const columns = watchlist ? watchlistTableColumns() : holdingsTableColumns();
+    if (!state.stocksSort.key || !columns.find((c) => c.key === state.stocksSort.key)) {
+      state.stocksSort = watchlist
+        ? { key: "ticker", dir: "asc" }
+        : { key: "position_market_value", dir: "desc" };
+    }
 
-  const headerHTML = columns
-    .map((col) => {
-      const active = state.stocksSort.key === col.key;
-      const arrow = active ? (state.stocksSort.dir === "asc" ? "▲" : "▼") : "";
-      const cls = [
-        col.align === "right" ? "num" : "",
-        active ? "sorted" : ""
-      ].filter(Boolean).join(" ");
-      return `<th class="${cls}" data-key="${col.key}">${col.label}<span class="sort-arrow">${arrow}</span></th>`;
-    })
-    .join("");
+    const enriched = visibleStocks.map((stock) => enrichStockRow(stock));
+    const sortedRows = sortStockRows(enriched, state.stocksSort);
 
-  let bodyHTML;
-  if (sortedRows.length === 0) {
-    bodyHTML = `<tr><td colspan="${columns.length}" class="empty">No stock data available.</td></tr>`;
-  } else {
-    bodyHTML = sortedRows
-      .map((row) => {
-        const stock = row._stock;
-        const tone = watchlist
-          ? "stock-card-neutral"
-          : stockToneClass(row.totalChange, row.hasBasis, row.isZeroCostBasisPosition);
-        const cells = columns.map((col) => col.render(row)).join("");
-        return `<tr class="stock-row ${tone}" data-ticker="${stock.ticker}">${cells}</tr>`;
+    const headerHTML = columns
+      .map((col) => {
+        const active = state.stocksSort.key === col.key;
+        const arrow = active ? (state.stocksSort.dir === "asc" ? "▲" : "▼") : "";
+        const cls = [
+          col.align === "right" ? "num" : "",
+          active ? "sorted" : ""
+        ].filter(Boolean).join(" ");
+        return `<th class="${cls}" data-key="${col.key}">${col.label}<span class="sort-arrow">${arrow}</span></th>`;
       })
       .join("");
+
+    let bodyHTML;
+    if (sortedRows.length === 0) {
+      bodyHTML = `<tr><td colspan="${columns.length}" class="empty">No stock data available.</td></tr>`;
+    } else {
+      bodyHTML = sortedRows
+        .map((row) => {
+          const stock = row._stock;
+          const tone = watchlist
+            ? "stock-card-neutral"
+            : stockToneClass(row.totalChange, row.hasBasis, row.isZeroCostBasisPosition);
+          const cells = columns.map((col) => col.render(row)).join("");
+          return `<tr class="stock-row ${tone}" data-ticker="${stock.ticker}">${cells}</tr>`;
+        })
+        .join("");
+    }
+
+    el.stocksList.innerHTML = `<table class="stocks-table"><thead><tr>${headerHTML}</tr></thead><tbody>${bodyHTML}</tbody></table>`;
+
+    el.stocksList.querySelectorAll("thead th").forEach((th) => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.key;
+        if (!key) return;
+        if (state.stocksSort.key === key) {
+          state.stocksSort.dir = state.stocksSort.dir === "asc" ? "desc" : "asc";
+        } else {
+          state.stocksSort.key = key;
+          state.stocksSort.dir = (key === "ticker" || key === "company_name") ? "asc" : "desc";
+        }
+        renderPortfolioDetail(portfolio, stocks, recentTransactions);
+      });
+    });
+
+    el.stocksList.querySelectorAll(".stock-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const ticker = row.dataset.ticker;
+        const selected = stocks.find((s) => s.ticker === ticker);
+        if (selected) {
+          showStockDialog(selected);
+        }
+      });
+    });
   }
-
-  el.stocksList.innerHTML = `<table class="stocks-table"><thead><tr>${headerHTML}</tr></thead><tbody>${bodyHTML}</tbody></table>`;
-
-  el.stocksList.querySelectorAll("thead th").forEach((th) => {
-    th.addEventListener("click", () => {
-      const key = th.dataset.key;
-      if (!key) return;
-      if (state.stocksSort.key === key) {
-        state.stocksSort.dir = state.stocksSort.dir === "asc" ? "desc" : "asc";
-      } else {
-        state.stocksSort.key = key;
-        state.stocksSort.dir = (key === "ticker" || key === "company_name") ? "asc" : "desc";
-      }
-      renderPortfolioDetail(portfolio, stocks, recentTransactions);
-    });
-  });
-
-  el.stocksList.querySelectorAll(".stock-row").forEach((row) => {
-    row.addEventListener("click", () => {
-      const ticker = row.dataset.ticker;
-      const selected = stocks.find((s) => s.ticker === ticker);
-      if (selected) {
-        showStockDialog(selected);
-      }
-    });
-  });
 
   if (watchlist) {
     el.openTransactionDialogBtn.hidden = true;
@@ -1283,7 +1619,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const allocationPanel = el.portfolioAllocationChart?.closest(".allocation-panel");
   const chartPanel = el.portfolioChart?.closest(".chart-panel");
   if (allocationPanel) {
-    allocationPanel.hidden = watchlist;
+    allocationPanel.hidden = watchlist || cash;
   }
   if (chartPanel) {
     chartPanel.hidden = watchlist;
@@ -1291,7 +1627,9 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
   if (!watchlist) {
     renderPortfolioChart();
-    renderAllocationChart(stocks, portfolio);
+    if (!cash) {
+      renderAllocationChart(stocks, portfolio);
+    }
   }
 }
 
@@ -1430,13 +1768,22 @@ function applyLivePricesToPortfolio(portfolio, stocks, livePriceMap) {
     updatedPortfolio.day_change_percent = baselineTotal > 0
       ? (dayChangeAmount / baselineTotal) * 100
       : 0;
+  } else if (isCashPortfolio(portfolio)) {
+    updatedPortfolio.day_change_amount = 0;
+    updatedPortfolio.day_change_percent = 0;
   } else {
-    const previousDayValue = previousDistinctDayValue(updatedPortfolio.daily_values, nowTs);
-    if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
-      const dayChangeAmount = updatedPortfolio.estimated_total_value - previousDayValue;
-      updatedPortfolio.day_change_amount = dayChangeAmount;
-      updatedPortfolio.day_change_percent = (dayChangeAmount / previousDayValue) * 100;
-    }
+    // Market-only day change: sum each position's (shares × price delta).
+    // Cash flows (deposits, withdrawals, asset transfers) are excluded so they
+    // don't masquerade as market movement.
+    const dayChangeAmount = updatedStocks.reduce(
+      (sum, stock) => sum + safeNumber(stock?.position_day_change_amount),
+      0
+    );
+    const previousTotal = updatedPortfolio.estimated_total_value - dayChangeAmount;
+    updatedPortfolio.day_change_amount = dayChangeAmount;
+    updatedPortfolio.day_change_percent = previousTotal > 0
+      ? (dayChangeAmount / previousTotal) * 100
+      : 0;
   }
 
   const existingIndex = updatedPortfolio.daily_values.findIndex(
@@ -1617,7 +1964,7 @@ async function refreshDashboardWithLivePrices() {
     if (shouldRenderDashboard) {
       renderDashboard();
       setActiveView("dashboard");
-      setBreadcrumbs([{ label: "Dashboard" }]);
+      setBreadcrumbs([{ label: "Assets" }]);
     }
     state.dashboardRefreshAppliedSeq = requestSeq;
   } catch (_) {
@@ -1753,7 +2100,7 @@ async function openPortfolio(name) {
     setPortfolioLastUpdatedChip(0);
 
     setBreadcrumbs([
-      { label: "Dashboard", onClick: showDashboard },
+      { label: "Assets", onClick: showDashboard },
       { label: portfolioDisplayName(name) }
     ]);
 
@@ -1779,7 +2126,7 @@ function showDashboard() {
   setMarketStateChip("UNKNOWN");
   setPortfolioLastUpdatedChip(0);
   setActiveView("dashboard");
-  setBreadcrumbs([{ label: "Dashboard" }]);
+  setBreadcrumbs([{ label: "Assets" }]);
   state.currentPortfolio = null;
   localStorage.removeItem(CURRENT_PORTFOLIO_KEY);
 }
@@ -1802,33 +2149,44 @@ function updateTransactionFormVisibility() {
   const isBuySell = type === "buy" || type === "sell";
   const isDividend = type === "dividend";
   const isInterest = type === "interest";
-  const isTransfer = type === "deposit" || type === "withdrawal";
+  const isTransferCash = type === "deposit" || type === "withdrawal";
+  const isTransferIn = type === "transfer_in_asset";
+  const isTransferOut = type === "transfer_out_asset";
+  const isTransferAsset = isTransferIn || isTransferOut;
+  const needsTicker = isBuySell || isDividend || isTransferAsset;
+  const needsShares = isBuySell || isDividend || isTransferAsset;
+  const needsPrice = isBuySell || isTransferIn;
+  const needsAmount = isDividend || isInterest || isTransferCash;
 
-  // Update visibility with both hidden attribute and display property for reliability
   const updateFieldVisibility = (el, shouldHide) => {
     if (el) {
       el.hidden = shouldHide;
-      if (shouldHide) {
-        el.style.display = "none";
-      } else {
-        el.style.display = "";
-      }
+      el.style.display = shouldHide ? "none" : "";
     }
   };
 
-  updateFieldVisibility(el.groupTicker, isInterest || isTransfer);
-  updateFieldVisibility(el.groupShares, !(isBuySell || isDividend));
-  updateFieldVisibility(el.groupPrice, !isBuySell);
-  updateFieldVisibility(el.groupAmount, !(isDividend || isInterest || isTransfer));
+  updateFieldVisibility(el.groupTicker, !needsTicker);
+  updateFieldVisibility(el.groupShares, !needsShares);
+  updateFieldVisibility(el.groupPrice, !needsPrice);
+  updateFieldVisibility(el.groupAmount, !needsAmount);
 
-  el.transactionTicker.required = !isInterest && !isTransfer;
-  el.transactionShares.required = isBuySell;
-  el.transactionPrice.required = isBuySell;
-  el.transactionAmount.required = isDividend || isInterest || isTransfer;
+  el.transactionTicker.required = needsTicker;
+  el.transactionShares.required = isBuySell || isTransferAsset;
+  el.transactionPrice.required = isBuySell; // cost basis is optional on transfer_in
+  el.transactionAmount.required = needsAmount;
 
-  if (isInterest || isTransfer) {
+  const priceLabel = el.groupPrice?.querySelector("label");
+  if (priceLabel) {
+    priceLabel.textContent = isTransferIn ? "Cost Basis Per Share (optional)" : "Price Per Share";
+  }
+
+  if (!needsTicker) {
     el.transactionTicker.value = "";
+  }
+  if (!needsShares) {
     el.transactionShares.value = "";
+  }
+  if (!needsPrice) {
     el.transactionPrice.value = "";
   }
 }
@@ -1847,9 +2205,14 @@ function resetCreatePortfolioForm() {
 }
 
 function updateCreatePortfolioFormForType() {
-  const watchlist = el.createPortfolioType.value === "WATCHLIST";
+  const type = el.createPortfolioType.value;
+  const watchlist = type === "WATCHLIST";
   el.createPortfolioCapitalRow.hidden = watchlist;
   el.createPortfolioCapital.disabled = watchlist;
+  const capitalLabel = el.createPortfolioCapitalRow.querySelector("label");
+  if (capitalLabel) {
+    capitalLabel.textContent = type === "CASH" ? "Starting Balance" : "Initial Capital";
+  }
 }
 
 function openCreatePortfolioDialog() {
@@ -1869,6 +2232,35 @@ function openTransactionDialog() {
   }
 
   resetTransactionForm();
+  const cash = isCashPortfolio(state.currentPortfolio);
+  const crypto = isCryptoPortfolio(state.currentPortfolio);
+  const assetNoun = crypto ? "Crypto" : "Asset";
+  Array.from(el.transactionType.options).forEach((opt) => {
+    const assetOnly = opt.value === "buy" || opt.value === "sell" ||
+                      opt.value === "dividend" ||
+                      opt.value === "transfer_in_asset" || opt.value === "transfer_out_asset";
+    opt.hidden = cash && assetOnly;
+    opt.disabled = cash && assetOnly;
+    if (opt.value === "buy") opt.textContent = crypto ? "Buy" : "Buy Stock";
+    if (opt.value === "sell") opt.textContent = crypto ? "Sell" : "Sell Stock";
+    if (opt.value === "transfer_in_asset") opt.textContent = `Transfer In ${assetNoun}`;
+    if (opt.value === "transfer_out_asset") opt.textContent = `Transfer Out ${assetNoun}`;
+    if (opt.value === "dividend") opt.hidden = cash || crypto;
+    if (opt.value === "dividend") opt.disabled = cash || crypto;
+  });
+  const tickerLabel = el.groupTicker?.querySelector("label");
+  if (tickerLabel) {
+    tickerLabel.textContent = crypto ? "Symbol" : "Ticker";
+  }
+  if (el.transactionTicker) {
+    el.transactionTicker.placeholder = crypto ? "BTC-USD" : "AAPL";
+  }
+  if (cash) {
+    el.transactionType.value = "deposit";
+  } else if (crypto) {
+    el.transactionType.value = "buy";
+  }
+  updateTransactionFormVisibility();
   el.transactionDialog.showModal();
 }
 
@@ -1898,6 +2290,12 @@ async function submitTransactionForm(event) {
     payload.ticker = el.transactionTicker.value.trim().toUpperCase();
     payload.shares = safeNumber(el.transactionShares.value);
     payload.price_per_share = safeNumber(el.transactionPrice.value);
+  } else if (action === "transfer_in_asset" || action === "transfer_out_asset") {
+    payload.ticker = el.transactionTicker.value.trim().toUpperCase();
+    payload.shares = safeNumber(el.transactionShares.value);
+    if (action === "transfer_in_asset") {
+      payload.cost_basis_per_share = safeNumber(el.transactionPrice.value);
+    }
   } else if (action === "dividend") {
     payload.ticker = el.transactionTicker.value.trim().toUpperCase();
     payload.amount = safeNumber(el.transactionAmount.value);
@@ -1911,15 +2309,20 @@ async function submitTransactionForm(event) {
     payload.amount = safeNumber(el.transactionAmount.value);
   }
 
+  const apiAction = (action === "transfer_in_asset") ? "transfer_in"
+                  : (action === "transfer_out_asset") ? "transfer_out"
+                  : action;
+
   try {
     el.transactionSubmitBtn.disabled = true;
     await apiPost(
-      `/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions/${action}`,
+      `/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions/${apiAction}`,
       payload
     );
 
     const latestSummary = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(latestSummary.portfolios);
+    refreshAllTransactionsForDashboard();
     await openPortfolio(state.currentPortfolio.name);
     showFlash("Transaction recorded successfully.");
     resetTransactionForm();
@@ -1990,7 +2393,7 @@ async function submitCreatePortfolioForm(event) {
     await openPortfolio(createdName);
 
     el.createPortfolioDialog.close();
-    showFlash(`Created portfolio ${portfolioDisplayName(createdName)}.`);
+    showFlash(`Created account ${portfolioDisplayName(createdName)}.`);
   } catch (error) {
     showFlash(error.message);
   } finally {
@@ -2003,6 +2406,7 @@ async function loadDashboard() {
   try {
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
+    refreshAllTransactionsForDashboard();
     renderDashboard();
     startDashboardLiveRefreshTimer();
 

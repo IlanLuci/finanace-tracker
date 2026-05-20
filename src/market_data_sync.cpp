@@ -29,7 +29,9 @@ namespace
     {
         return type == TransactionType::BUY_STOCK ||
                type == TransactionType::SELL_STOCK ||
-               type == TransactionType::DIVIDEND;
+               type == TransactionType::DIVIDEND ||
+               type == TransactionType::TRANSFER_IN_ASSET ||
+               type == TransactionType::TRANSFER_OUT_ASSET;
     }
 
     std::string normalizeTicker(const std::string& ticker)
@@ -525,12 +527,48 @@ namespace MarketDataSync
             }
         );
 
+        const auto isCashNeutral = [](TransactionType t)
+        {
+            return t == TransactionType::TRANSFER_IN_ASSET ||
+                   t == TransactionType::TRANSFER_OUT_ASSET;
+        };
+
         std::set<long long> timeline_days;
         double initial_cash = portfolio.getAvailableCapital();
         for (const auto& tx : txs)
         {
             timeline_days.insert(dayBucket(tx.date));
-            initial_cash -= tx.amount;
+            if (!isCashNeutral(tx.type))
+            {
+                initial_cash -= tx.amount;
+            }
+        }
+
+        // CASH portfolios have no stocks; rebuild the balance series from
+        // transactions alone, and always anchor a point at "today" so a freshly
+        // created account shows up on the chart.
+        if (portfolio.getType() == PortfolioType::CASH)
+        {
+            const long long today = dayBucket(std::time(nullptr));
+            timeline_days.insert(today);
+
+            std::vector<DailyPortfolioValue> rebuilt_values;
+            rebuilt_values.reserve(timeline_days.size());
+
+            size_t tx_cursor = 0;
+            double running_cash = initial_cash;
+            for (const long long day : timeline_days)
+            {
+                while (tx_cursor < txs.size() && dayBucket(txs[tx_cursor].date) <= day)
+                {
+                    running_cash += txs[tx_cursor].amount;
+                    ++tx_cursor;
+                }
+                rebuilt_values.emplace_back(dayBucketToTimestamp(day), running_cash, std::time(nullptr));
+            }
+
+            portfolio.setDailyValues(rebuilt_values);
+            return manager.savePortfolio(portfolio_name, portfolio);
         }
 
         struct PriceTrack
@@ -589,13 +627,18 @@ namespace MarketDataSync
             while (tx_cursor < txs.size() && dayBucket(txs[tx_cursor].date) <= day)
             {
                 const Transaction& tx = txs[tx_cursor];
-                running_cash += tx.amount;
+                if (!isCashNeutral(tx.type))
+                {
+                    running_cash += tx.amount;
+                }
 
-                if (tx.type == TransactionType::BUY_STOCK)
+                if (tx.type == TransactionType::BUY_STOCK ||
+                    tx.type == TransactionType::TRANSFER_IN_ASSET)
                 {
                     shares_by_ticker[normalizeTicker(tx.stock_symbol)] += tx.shares;
                 }
-                else if (tx.type == TransactionType::SELL_STOCK)
+                else if (tx.type == TransactionType::SELL_STOCK ||
+                         tx.type == TransactionType::TRANSFER_OUT_ASSET)
                 {
                     shares_by_ticker[normalizeTicker(tx.stock_symbol)] -= tx.shares;
                 }
@@ -636,6 +679,13 @@ namespace MarketDataSync
         if (!manager.loadPortfolio(portfolio_name, portfolio))
         {
             return false;
+        }
+
+        // CASH portfolios hold no tickers — skip the Yahoo Finance fetch path
+        // and just rebuild the balance series from transactions.
+        if (portfolio.getType() == PortfolioType::CASH)
+        {
+            return recomputePortfolioDailyValues(manager, portfolio_name);
         }
 
         // Seed or refresh transaction-derived stock files first so later market-data

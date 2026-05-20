@@ -668,6 +668,14 @@ namespace
         {
             return PortfolioType::WATCHLIST;
         }
+        if (normalized == "CASH")
+        {
+            return PortfolioType::CASH;
+        }
+        if (normalized == "CRYPTO")
+        {
+            return PortfolioType::CRYPTO;
+        }
 
         return std::nullopt;
     }
@@ -1276,6 +1284,8 @@ namespace
             case TransactionType::SELL_STOCK: return "SELL_STOCK";
             case TransactionType::DIVIDEND: return "DIVIDEND";
             case TransactionType::INTEREST: return "INTEREST";
+            case TransactionType::TRANSFER_IN_ASSET: return "TRANSFER_IN_ASSET";
+            case TransactionType::TRANSFER_OUT_ASSET: return "TRANSFER_OUT_ASSET";
         }
 
         return "UNKNOWN";
@@ -1289,6 +1299,8 @@ namespace
             case PortfolioType::ROTH_IRA: return "ROTH_IRA";
             case PortfolioType::TRADITIONAL_IRA: return "TRADITIONAL_IRA";
             case PortfolioType::WATCHLIST: return "WATCHLIST";
+            case PortfolioType::CASH: return "CASH";
+            case PortfolioType::CRYPTO: return "CRYPTO";
         }
 
         return "UNKNOWN";
@@ -1519,6 +1531,30 @@ namespace
                 lot.shares += tx.shares;
                 lot.total_cost += -tx.amount; // amount is negative for buys
             }
+            else if (tx.type == TransactionType::TRANSFER_IN_ASSET)
+            {
+                lot.shares += tx.shares;
+                lot.total_cost += tx.amount; // amount holds the cost basis for transfers in
+            }
+            else if (tx.type == TransactionType::TRANSFER_OUT_ASSET)
+            {
+                const double avg_cost = lot.shares > 0.0 ? lot.total_cost / lot.shares : 0.0;
+                const double cost_basis = avg_cost * tx.shares;
+                lot.shares -= tx.shares;
+                if (lot.shares <= 1e-9)
+                {
+                    lot.shares = 0.0;
+                    lot.total_cost = 0.0;
+                }
+                else
+                {
+                    lot.total_cost -= cost_basis;
+                    if (lot.total_cost < 0.0)
+                    {
+                        lot.total_cost = 0.0;
+                    }
+                }
+            }
             else if (tx.type == TransactionType::SELL_STOCK)
             {
                 const double avg_cost = lot.shares > 0.0 ? lot.total_cost / lot.shares : 0.0;
@@ -1612,7 +1648,7 @@ namespace
             return false;
         }
 
-        return type <= static_cast<uint8_t>(PortfolioType::WATCHLIST);
+        return type <= static_cast<uint8_t>(PortfolioType::CRYPTO);
     }
 
     double estimatePortfolioTotalValue(const Portfolio& portfolio, PortfolioManager& manager, const std::string& portfolio_name)
@@ -1652,45 +1688,6 @@ namespace
         }
 
         return total;
-    }
-
-    bool getLatestAndPreviousDistinctDayValues(const std::vector<DailyPortfolioValue>& values,
-                                               double& latest_value,
-                                               time_t& latest_date,
-                                               double& previous_value,
-                                               time_t& previous_date)
-    {
-        if (values.empty())
-        {
-            return false;
-        }
-
-        std::vector<DailyPortfolioValue> sorted_values = values;
-        std::sort(
-            sorted_values.begin(),
-            sorted_values.end(),
-            [](const DailyPortfolioValue& lhs, const DailyPortfolioValue& rhs)
-            {
-                return lhs.date < rhs.date;
-            }
-        );
-
-        const DailyPortfolioValue& latest = sorted_values.back();
-        latest_value = latest.value;
-        latest_date = latest.date;
-
-        const long long latest_bucket = dayBucketForTimestamp(latest.date);
-        for (auto it = sorted_values.rbegin() + 1; it != sorted_values.rend(); ++it)
-        {
-            if (dayBucketForTimestamp(it->date) < latest_bucket)
-            {
-                previous_value = it->value;
-                previous_date = it->date;
-                return true;
-            }
-        }
-
-        return false;
     }
 
     bool getLatestAndPreviousStockPrices(const StockData& stock,
@@ -1750,17 +1747,37 @@ namespace
             return day_change_amount;
         }
 
-        double latest_value = 0.0;
-        time_t latest_date = 0;
-        double previous_value = 0.0;
-        time_t previous_date = 0;
-        if (!getLatestAndPreviousDistinctDayValues(portfolio.getDailyValues(), latest_value, latest_date, previous_value, previous_date))
+        if (portfolio.getType() == PortfolioType::CASH)
         {
             return 0.0;
         }
 
-        const double current_total = estimatePortfolioTotalValue(portfolio, manager, portfolio_name);
-        return current_total - previous_value;
+        // Market-driven day change only: sum over current holdings of
+        // (latest_price - previous_close) * shares_owned. Excludes cash flows
+        // (deposits, withdrawals, asset transfers) so they don't show up as
+        // a fake "day change" on the dashboard.
+        double day_change_amount = 0.0;
+        for (const std::string& ticker : manager.listStocks(portfolio_name))
+        {
+            StockData stock;
+            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            {
+                continue;
+            }
+
+            double latest_price = 0.0;
+            time_t latest_date = 0;
+            double previous_price = 0.0;
+            time_t previous_date = 0;
+            if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+            {
+                continue;
+            }
+
+            day_change_amount += stock.getSharesOwned() * (latest_price - previous_price);
+        }
+
+        return day_change_amount;
     }
 
     double calculatePortfolioDayChangePercent(const Portfolio& portfolio,
@@ -1784,22 +1801,19 @@ namespace
             return (day_change_amount / std::abs(previous_close_total)) * 100.0;
         }
 
-        double latest_value = 0.0;
-        time_t latest_date = 0;
-        double previous_value = 0.0;
-        time_t previous_date = 0;
-        if (!getLatestAndPreviousDistinctDayValues(portfolio.getDailyValues(), latest_value, latest_date, previous_value, previous_date))
+        if (portfolio.getType() == PortfolioType::CASH)
         {
             return 0.0;
         }
 
-        if (std::abs(previous_value) < 1e-9)
+        const double day_change_amount = calculatePortfolioDayChangeAmount(portfolio, manager, portfolio_name);
+        const double current_total = estimatePortfolioTotalValue(portfolio, manager, portfolio_name);
+        const double previous_total = current_total - day_change_amount;
+        if (std::abs(previous_total) < 1e-9)
         {
             return 0.0;
         }
-
-        const double amount = estimatePortfolioTotalValue(portfolio, manager, portfolio_name) - previous_value;
-        return (amount / std::abs(previous_value)) * 100.0;
+        return (day_change_amount / std::abs(previous_total)) * 100.0;
     }
 
     bool getLatestAndPreviousStockPrices(const StockData& stock,
@@ -1887,11 +1901,13 @@ namespace
                 continue;
             }
 
-            if (tx.type == TransactionType::BUY_STOCK)
+            if (tx.type == TransactionType::BUY_STOCK ||
+                tx.type == TransactionType::TRANSFER_IN_ASSET)
             {
                 shares_owned += tx.shares;
             }
-            else if (tx.type == TransactionType::SELL_STOCK)
+            else if (tx.type == TransactionType::SELL_STOCK ||
+                     tx.type == TransactionType::TRANSFER_OUT_ASSET)
             {
                 shares_owned -= tx.shares;
             }
@@ -2471,13 +2487,105 @@ namespace
 
         std::ostringstream out;
         out << "{"
-            << "\"status\":\"ok\"," 
+            << "\"status\":\"ok\","
             << "\"portfolio\":" << jsonString(portfolio_name) << ","
             << "\"ticker\":" << jsonString(normalized_ticker) << ","
             << "\"shares\":" << jsonNumber(shares) << ","
             << "\"price_per_share\":" << jsonNumber(price_per_share) << ","
             << "\"amount\":" << jsonNumber(amount) << ","
             << "\"available_capital\":" << jsonNumber(next_capital)
+            << "}";
+
+        return makeJsonResponse(201, out.str());
+    }
+
+    HttpResponse appendAssetTransferTransaction(PortfolioManager& manager,
+                                                const std::string& portfolio_name,
+                                                TransactionType type,
+                                                const std::string& ticker,
+                                                double shares,
+                                                double cost_basis_per_share,
+                                                time_t date,
+                                                const std::string& notes)
+    {
+        Portfolio portfolio;
+        if (!manager.loadPortfolio(portfolio_name, portfolio))
+        {
+            return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+        }
+
+        const std::string normalized_ticker = upperCopy(ticker);
+        if (normalized_ticker.empty() || !isValidTickerSymbol(normalized_ticker))
+        {
+            return makeJsonResponse(400, makeErrorBody("Ticker is required and must be valid"));
+        }
+
+        if (!isFinitePositive(shares))
+        {
+            return makeJsonResponse(400, makeErrorBody("Shares must be > 0"));
+        }
+
+        if (!isFiniteNonNegative(cost_basis_per_share))
+        {
+            return makeJsonResponse(400, makeErrorBody("Cost basis per share must be >= 0"));
+        }
+
+        if (type == TransactionType::TRANSFER_OUT_ASSET)
+        {
+            const double shares_owned = calculateSharesOwnedFromTransactions(portfolio, normalized_ticker);
+            if (shares > shares_owned + 1e-9)
+            {
+                return makeJsonResponse(409, makeErrorBody("Not enough shares to transfer out"));
+            }
+        }
+
+        if (type == TransactionType::TRANSFER_IN_ASSET)
+        {
+            bool is_invalid_ticker = false;
+            const bool checked = maybeTickerExistsOnYahoo(normalized_ticker, is_invalid_ticker);
+            if (checked && is_invalid_ticker)
+            {
+                return makeJsonResponse(400, makeErrorBody("Ticker was not found by market data provider"));
+            }
+        }
+
+        // amount carries cost basis for transfer_in (so the rebuild can derive
+        // price_per_share). transfer_out keeps amount at 0. Available capital
+        // is intentionally untouched: transfers do not move cash.
+        const double amount = (type == TransactionType::TRANSFER_IN_ASSET)
+            ? shares * cost_basis_per_share
+            : 0.0;
+
+        portfolio.addTransaction(date, amount, type, normalized_ticker, shares, notes);
+
+        if (!manager.savePortfolio(portfolio_name, portfolio))
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to save portfolio"));
+        }
+
+        const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+        if (!MarketDataSync::syncPortfolio(manager, portfolio_name, sync_config))
+        {
+            return makeJsonResponse(500, makeErrorBody("Transaction saved but market-data sync/daily value recompute failed"));
+        }
+
+        {
+            std::string live_quote_error;
+            if (!persistLiveQuoteForTicker(manager, portfolio_name, normalized_ticker, live_quote_error))
+            {
+                std::cerr << "Immediate live quote persist skipped for " << normalized_ticker
+                          << ": " << live_quote_error << std::endl;
+            }
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"status\":\"ok\","
+            << "\"portfolio\":" << jsonString(portfolio_name) << ","
+            << "\"ticker\":" << jsonString(normalized_ticker) << ","
+            << "\"shares\":" << jsonNumber(shares) << ","
+            << "\"cost_basis_per_share\":" << jsonNumber(cost_basis_per_share) << ","
+            << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital())
             << "}";
 
         return makeJsonResponse(201, out.str());
@@ -2648,7 +2756,7 @@ namespace
             auto parsed_type = parsePortfolioType(raw_type.value());
             if (!parsed_type.has_value())
             {
-                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, TRADITIONAL_IRA, or WATCHLIST"));
+                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, TRADITIONAL_IRA, WATCHLIST, CASH, or CRYPTO"));
             }
 
             double initial_capital = getObjectNumber(body, "initial_capital").value_or(0.0);
@@ -3117,6 +3225,32 @@ namespace
                         portfolio_name,
                         TransactionType::INTEREST,
                         amount.value(),
+                        date,
+                        notes
+                    );
+                }
+
+                if (action == "transfer_in" || action == "transfer_out")
+                {
+                    auto ticker = getObjectString(body, "ticker");
+                    auto shares = getObjectNumber(body, "shares");
+                    if (!ticker.has_value() || !shares.has_value())
+                    {
+                        return makeJsonResponse(400, makeErrorBody("transfer requires ticker and shares"));
+                    }
+
+                    const double cost_basis = (action == "transfer_in")
+                        ? getObjectNumber(body, "cost_basis_per_share").value_or(0.0)
+                        : 0.0;
+
+                    return appendAssetTransferTransaction(
+                        manager,
+                        portfolio_name,
+                        action == "transfer_in" ? TransactionType::TRANSFER_IN_ASSET
+                                                : TransactionType::TRANSFER_OUT_ASSET,
+                        ticker.value(),
+                        shares.value(),
+                        cost_basis,
                         date,
                         notes
                     );

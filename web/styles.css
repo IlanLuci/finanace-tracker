@@ -348,6 +348,37 @@ article.stock-card-neutral {
   font-size: 1rem;
 }
 
+.card-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pin-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  transition: color 0.06s;
+}
+
+.pin-btn:hover {
+  color: var(--ink);
+}
+
+.pin-btn.is-pinned {
+  color: var(--select);
+}
+
+.monthly-year-total td {
+  background: #ebebeb;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
 .stock-market-value {
   font-weight: 500;
 }

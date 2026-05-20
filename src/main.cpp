@@ -105,6 +105,12 @@ void printPortfolioInfo(const Portfolio& portfolio)
         case PortfolioType::WATCHLIST:
             std::cout << "Type: Watchlist" << std::endl;
             break;
+        case PortfolioType::CASH:
+            std::cout << "Type: Cash Account" << std::endl;
+            break;
+        case PortfolioType::CRYPTO:
+            std::cout << "Type: Crypto" << std::endl;
+            break;
     }
     
     std::cout << "Available Capital: " << FileUtils::formatCurrency(portfolio.getAvailableCapital()) << std::endl;
