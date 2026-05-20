@@ -145,6 +145,7 @@ private:
     uint32_t version;
     PortfolioType type;
     double available_capital;
+    std::string currency;       // ISO 4217 code; "USD" for legacy/non-cash accounts
     std::vector<DailyPortfolioValue> daily_values;
     std::vector<Transaction> transactions;
 
@@ -152,16 +153,19 @@ public:
     // Constructor
     Portfolio();
     Portfolio(PortfolioType ptype, double initial_capital);
+    Portfolio(PortfolioType ptype, double initial_capital, const std::string& ccy);
 
     // Getters
     uint32_t getVersion() const { return version; }
     PortfolioType getType() const { return type; }
     double getAvailableCapital() const { return available_capital; }
+    const std::string& getCurrency() const { return currency; }
     const std::vector<DailyPortfolioValue>& getDailyValues() const { return daily_values; }
     const std::vector<Transaction>& getTransactions() const { return transactions; }
 
     // Setters
     void setAvailableCapital(double capital) { available_capital = capital; }
+    void setCurrency(const std::string& ccy) { currency = ccy; }
     void addDailyValue(time_t date, double value);
     bool updateDailyValue(time_t date, double value, time_t updated_at = std::time(nullptr));
     void setDailyValues(const std::vector<DailyPortfolioValue>& values);
@@ -190,7 +194,8 @@ public:
     PortfolioManager(const std::string& data_dir = "data");
 
     // Portfolio management
-    bool createPortfolio(const std::string& name, PortfolioType type, double initial_capital);
+    bool createPortfolio(const std::string& name, PortfolioType type, double initial_capital,
+                         const std::string& currency = "USD");
     bool loadPortfolio(const std::string& name, Portfolio& portfolio);
     bool savePortfolio(const std::string& name, const Portfolio& portfolio);
     bool deletePortfolio(const std::string& name);

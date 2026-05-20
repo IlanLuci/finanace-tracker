@@ -291,7 +291,16 @@ const el = {
   createPortfolioType: document.getElementById("createPortfolioType"),
   createPortfolioCapitalRow: document.getElementById("createPortfolioCapitalRow"),
   createPortfolioCapital: document.getElementById("createPortfolioCapital"),
+  createPortfolioCurrencyRow: document.getElementById("createPortfolioCurrencyRow"),
+  createPortfolioCurrency: document.getElementById("createPortfolioCurrency"),
+  createPortfolioCurrencyOtherRow: document.getElementById("createPortfolioCurrencyOtherRow"),
+  createPortfolioCurrencyOther: document.getElementById("createPortfolioCurrencyOther"),
   createPortfolioSubmitBtn: document.getElementById("createPortfolioSubmitBtn"),
+  deleteAccountBtn: document.getElementById("deleteAccountBtn"),
+  deleteAccountDialog: document.getElementById("deleteAccountDialog"),
+  deleteAccountName: document.getElementById("deleteAccountName"),
+  deleteAccountCancelBtn: document.getElementById("deleteAccountCancelBtn"),
+  deleteAccountConfirmBtn: document.getElementById("deleteAccountConfirmBtn"),
   backToDashBtn: document.getElementById("backToDashBtn"),
   apiConfigToggle: document.getElementById("apiConfigToggle"),
   apiConfigPanel: document.getElementById("apiConfigPanel"),
@@ -629,6 +638,21 @@ function currency(value) {
   }).format(value || 0);
 }
 
+function currencyIn(value, code) {
+  const ccy = String(code || "USD").toUpperCase();
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: ccy,
+      maximumFractionDigits: 2
+    }).format(value || 0);
+  } catch (_err) {
+    // Unknown ISO code — fall back to a number with the code appended.
+    const formatted = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value || 0);
+    return `${formatted} ${ccy}`;
+  }
+}
+
 function safeNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -936,6 +960,8 @@ function normalizePortfolios(rawPortfolios) {
       ...p,
       name: String(p.name),
       type: String(p.type || "UNKNOWN"),
+      currency: String(p.currency || "USD").toUpperCase(),
+      fx_to_usd: Number.isFinite(Number(p.fx_to_usd)) && Number(p.fx_to_usd) > 0 ? Number(p.fx_to_usd) : 1,
       available_capital: safeNumber(p.available_capital),
       estimated_total_value: safeNumber(p.estimated_total_value),
       reported_total_value: safeNumber(p.reported_total_value),
@@ -1162,7 +1188,12 @@ function renderDashboard() {
   const accountPortfolios = portfolios.filter((p) => !isWatchlistPortfolio(p));
 
   const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
-  const totalCash = accountPortfolios.reduce((sum, p) => sum + (p.available_capital || 0), 0);
+  // Convert each account's native-currency cash to USD before summing so foreign
+  // cash accounts contribute correctly to the dashboard total.
+  const totalCash = accountPortfolios.reduce((sum, p) => {
+    const fx = (p.currency && p.currency !== "USD") ? (p.fx_to_usd || 1) : 1;
+    return sum + (p.available_capital || 0) * fx;
+  }, 0);
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
   // Day Change tracks the chart: live total vs. the most recent prior-day
@@ -1221,7 +1252,13 @@ function renderDashboard() {
         body = `<div class="sub">Watchlist only</div>
                 <div class="sub">${p.stock_count} symbols tracked</div>`;
       } else if (isCashPortfolio(p)) {
-        body = `<div>${currency(p.available_capital)}</div>
+        const ccy = p.currency || "USD";
+        const native = currencyIn(p.available_capital, ccy);
+        const usdEquiv = (ccy !== "USD")
+          ? `<div class="sub">${currency((p.available_capital || 0) * (p.fx_to_usd || 1))} USD</div>`
+          : "";
+        body = `<div>${native}</div>
+                ${usdEquiv}
                 <div class="sub">${p.transaction_count} transaction${p.transaction_count === 1 ? "" : "s"}</div>`;
       } else {
         body = `<div>${currency(p.estimated_total_value)}</div>
@@ -1508,8 +1545,16 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     el.portfolioMetrics.hidden = true;
   } else if (cash) {
     el.portfolioMetrics.hidden = false;
+    const ccy = portfolio.currency || "USD";
+    const balanceLabel = (ccy !== "USD")
+      ? `Current Balance (${ccy})`
+      : "Current Balance";
+    const balanceValue = currencyIn(portfolio.available_capital, ccy);
+    const usdSub = (ccy !== "USD")
+      ? `${currency((portfolio.available_capital || 0) * (portfolio.fx_to_usd || 1))} USD @ ${Number(portfolio.fx_to_usd || 1).toFixed(4)}`
+      : "";
     el.portfolioMetrics.innerHTML = [
-      metricCard("Current Balance", currency(portfolio.available_capital)),
+      metricCard(balanceLabel, balanceValue, usdSub),
       metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
       metricCard("Transactions", String(portfolio.transaction_count || 0))
     ].join("");
@@ -2201,18 +2246,33 @@ function resetCreatePortfolioForm() {
   el.createPortfolioForm.reset();
   el.createPortfolioType.value = "BROKERAGE";
   el.createPortfolioCapital.value = "0";
+  el.createPortfolioCurrency.value = "USD";
+  el.createPortfolioCurrencyOther.value = "";
   updateCreatePortfolioFormForType();
 }
 
 function updateCreatePortfolioFormForType() {
   const type = el.createPortfolioType.value;
   const watchlist = type === "WATCHLIST";
+  const cash = type === "CASH";
   el.createPortfolioCapitalRow.hidden = watchlist;
   el.createPortfolioCapital.disabled = watchlist;
   const capitalLabel = el.createPortfolioCapitalRow.querySelector("label");
   if (capitalLabel) {
-    capitalLabel.textContent = type === "CASH" ? "Starting Balance" : "Initial Capital";
+    capitalLabel.textContent = cash ? "Starting Balance" : "Initial Capital";
   }
+  el.createPortfolioCurrencyRow.hidden = !cash;
+  if (!cash) {
+    el.createPortfolioCurrency.value = "USD";
+  }
+  updateCreatePortfolioCurrencyOtherVisibility();
+}
+
+function updateCreatePortfolioCurrencyOtherVisibility() {
+  const cash = el.createPortfolioType.value === "CASH";
+  const showOther = cash && el.createPortfolioCurrency.value === "OTHER";
+  el.createPortfolioCurrencyOtherRow.hidden = !showOther;
+  el.createPortfolioCurrencyOther.required = showOther;
 }
 
 function openCreatePortfolioDialog() {
@@ -2359,6 +2419,7 @@ async function submitCreatePortfolioForm(event) {
   const name = el.createPortfolioName.value.trim();
   const type = el.createPortfolioType.value;
   const isWatchlist = type === "WATCHLIST";
+  const isCash = type === "CASH";
   const initialCapital = safeNumber(el.createPortfolioCapital.value);
 
   if (!name) {
@@ -2371,6 +2432,20 @@ async function submitCreatePortfolioForm(event) {
     return;
   }
 
+  let currencyCode = "USD";
+  if (isCash) {
+    const selected = el.createPortfolioCurrency.value;
+    if (selected === "OTHER") {
+      currencyCode = el.createPortfolioCurrencyOther.value.trim().toUpperCase();
+    } else {
+      currencyCode = selected;
+    }
+    if (!/^[A-Z]{3}$/.test(currencyCode)) {
+      showFlash("Currency must be a 3-letter ISO code (e.g. EUR, JPY).");
+      return;
+    }
+  }
+
   try {
     el.createPortfolioSubmitBtn.disabled = true;
 
@@ -2380,6 +2455,9 @@ async function submitCreatePortfolioForm(event) {
     };
     if (!isWatchlist) {
       body.initial_capital = initialCapital;
+    }
+    if (isCash) {
+      body.currency = currencyCode;
     }
 
     const created = await apiPost("/api/portfolios", body);
@@ -2398,6 +2476,38 @@ async function submitCreatePortfolioForm(event) {
     showFlash(error.message);
   } finally {
     el.createPortfolioSubmitBtn.disabled = false;
+  }
+}
+
+function openDeleteAccountDialog() {
+  if (!state.currentPortfolio) {
+    showFlash("Select an account first.");
+    return;
+  }
+  el.deleteAccountName.textContent = portfolioDisplayName(state.currentPortfolio.name);
+  el.deleteAccountDialog.showModal();
+}
+
+async function confirmDeleteAccount() {
+  if (!state.currentPortfolio) {
+    return;
+  }
+  const name = state.currentPortfolio.name;
+  try {
+    el.deleteAccountConfirmBtn.disabled = true;
+    await apiDelete(`/api/portfolios/${encodeURIComponent(name)}`);
+
+    const payload = await apiGet("/api/portfolios");
+    state.portfolios = normalizePortfolios(payload.portfolios);
+    renderDashboard();
+    showDashboard();
+
+    el.deleteAccountDialog.close();
+    showFlash(`Deleted account ${portfolioDisplayName(name)}.`);
+  } catch (error) {
+    showFlash(error.message);
+  } finally {
+    el.deleteAccountConfirmBtn.disabled = false;
   }
 }
 
@@ -2459,6 +2569,10 @@ function wireEvents() {
   el.transactionForm.addEventListener("submit", submitTransactionForm);
   el.createPortfolioForm.addEventListener("submit", submitCreatePortfolioForm);
   el.createPortfolioType.addEventListener("change", updateCreatePortfolioFormForType);
+  el.createPortfolioCurrency.addEventListener("change", updateCreatePortfolioCurrencyOtherVisibility);
+  el.deleteAccountBtn.addEventListener("click", openDeleteAccountDialog);
+  el.deleteAccountCancelBtn.addEventListener("click", () => el.deleteAccountDialog.close());
+  el.deleteAccountConfirmBtn.addEventListener("click", confirmDeleteAccount);
 
   el.apiConfigToggle.addEventListener("click", toggleApiPanel);
   el.apiConfigForm.addEventListener("submit", saveApiBase);

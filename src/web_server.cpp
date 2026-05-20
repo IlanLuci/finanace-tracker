@@ -32,7 +32,7 @@
 
 namespace
 {
-    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 2;
+    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 3;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
@@ -641,6 +641,23 @@ namespace
         return true;
     }
 
+    // ISO 4217 codes are 3 uppercase letters (we already upperCopy on input).
+    bool isValidCurrencyCode(const std::string& ccy)
+    {
+        if (ccy.size() != 3)
+        {
+            return false;
+        }
+        for (const char ch : ccy)
+        {
+            if (ch < 'A' || ch > 'Z')
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::optional<PortfolioType> parsePortfolioType(const std::string& raw)
     {
         std::string normalized = upperCopy(trim(raw));
@@ -1168,6 +1185,37 @@ namespace
         return true;
     }
 
+    // Returns USD-per-unit of the given foreign currency. USD -> 1.0.
+    // Tries Yahoo Finance FX pair like "EURUSD=X" via the live-quote cache.
+    // Returns 1.0 on lookup failure so totals still render (best-effort).
+    double fetchUsdRateForCurrency(const std::string& currency_code)
+    {
+        const std::string ccy = upperCopy(trim(currency_code));
+        if (ccy.empty() || ccy == "USD")
+        {
+            return 1.0;
+        }
+        if (!isValidCurrencyCode(ccy))
+        {
+            return 1.0;
+        }
+
+        const std::string pair = ccy + "USD=X";
+        std::map<std::string, std::tuple<double, time_t, std::string, double>> quotes;
+        std::string error;
+        if (!fetchLiveQuotesCached({pair}, quotes, error))
+        {
+            return 1.0;
+        }
+        auto it = quotes.find(pair);
+        if (it == quotes.end())
+        {
+            return 1.0;
+        }
+        const double rate = std::get<0>(it->second);
+        return (std::isfinite(rate) && rate > 0.0) ? rate : 1.0;
+    }
+
     bool persistLiveQuoteForTicker(PortfolioManager& manager,
                                    const std::string& portfolio_name,
                                    const std::string& ticker,
@@ -1658,7 +1706,19 @@ namespace
             return 0.0;
         }
 
-        double total = portfolio.getAvailableCapital();
+        // For foreign-currency cash accounts, convert the balance into USD so the
+        // dashboard total is unified. Stocks/crypto stay in USD already.
+        double cash_in_usd = portfolio.getAvailableCapital();
+        if (portfolio.getType() == PortfolioType::CASH)
+        {
+            const std::string ccy = upperCopy(trim(portfolio.getCurrency()));
+            if (!ccy.empty() && ccy != "USD")
+            {
+                cash_in_usd *= fetchUsdRateForCurrency(ccy);
+            }
+        }
+
+        double total = cash_in_usd;
         const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
 
         for (const std::string& ticker : tickers)
@@ -1948,9 +2008,17 @@ namespace
             }
             first = false;
 
+            const std::string portfolio_currency = upperCopy(trim(portfolio.getCurrency()));
+            const std::string ccy_out = portfolio_currency.empty() ? std::string("USD") : portfolio_currency;
+            const double fx_rate = (portfolio.getType() == PortfolioType::CASH && ccy_out != "USD")
+                                       ? fetchUsdRateForCurrency(ccy_out)
+                                       : 1.0;
+
             out << "{"
                 << "\"name\":" << jsonString(name) << ","
                 << "\"type\":" << jsonString(portfolioTypeToString(portfolio.getType())) << ","
+                << "\"currency\":" << jsonString(ccy_out) << ","
+                << "\"fx_to_usd\":" << jsonNumber(fx_rate) << ","
                 << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital()) << ","
                 << "\"reported_total_value\":" << jsonNumber(portfolio.getCurrentPortfolioValue()) << ","
                 << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
@@ -1974,10 +2042,18 @@ namespace
             return "";
         }
 
+        const std::string portfolio_currency = upperCopy(trim(portfolio.getCurrency()));
+        const std::string ccy_out = portfolio_currency.empty() ? std::string("USD") : portfolio_currency;
+        const double fx_rate = (portfolio.getType() == PortfolioType::CASH && ccy_out != "USD")
+                                   ? fetchUsdRateForCurrency(ccy_out)
+                                   : 1.0;
+
         std::ostringstream out;
         out << "{"
             << "\"name\":" << jsonString(name) << ","
             << "\"type\":" << jsonString(portfolioTypeToString(portfolio.getType())) << ","
+            << "\"currency\":" << jsonString(ccy_out) << ","
+            << "\"fx_to_usd\":" << jsonNumber(fx_rate) << ","
             << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital()) << ","
             << "\"reported_total_value\":" << jsonNumber(portfolio.getCurrentPortfolioValue()) << ","
             << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
@@ -2770,6 +2846,22 @@ namespace
                 initial_capital = 0.0;
             }
 
+            // Currency is meaningful for CASH accounts; everything else stays USD.
+            std::string currency_code = "USD";
+            auto raw_currency = getObjectString(body, "currency");
+            if (raw_currency.has_value())
+            {
+                std::string normalized_ccy = upperCopy(trim(raw_currency.value()));
+                if (parsed_type.value() == PortfolioType::CASH && !normalized_ccy.empty())
+                {
+                    if (!isValidCurrencyCode(normalized_ccy))
+                    {
+                        return makeJsonResponse(400, makeErrorBody("currency must be a 3-letter ISO 4217 code"));
+                    }
+                    currency_code = normalized_ccy;
+                }
+            }
+
             if (manager.scanPortfolios())
             {
                 const auto& names = manager.getPortfolioNames();
@@ -2779,7 +2871,7 @@ namespace
                 }
             }
 
-            if (!manager.createPortfolio(portfolio_name, parsed_type.value(), initial_capital))
+            if (!manager.createPortfolio(portfolio_name, parsed_type.value(), initial_capital, currency_code))
             {
                 return makeJsonResponse(500, makeErrorBody("Failed to create portfolio"));
             }
@@ -2792,9 +2884,10 @@ namespace
 
             std::ostringstream out;
             out << "{"
-                << "\"status\":\"ok\"," 
+                << "\"status\":\"ok\","
                 << "\"name\":" << jsonString(portfolio_name) << ","
                 << "\"type\":" << jsonString(portfolioTypeToString(created.getType())) << ","
+                << "\"currency\":" << jsonString(created.getCurrency()) << ","
                 << "\"available_capital\":" << jsonNumber(created.getAvailableCapital())
                 << "}";
             return makeJsonResponse(201, out.str());
@@ -2812,6 +2905,27 @@ namespace
                     return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
                 }
                 return makeJsonResponse(200, json);
+            }
+
+            if (request.method == "DELETE" && segments.size() == 3)
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Account not found"));
+                }
+
+                if (!manager.deletePortfolio(portfolio_name))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to delete account"));
+                }
+
+                std::ostringstream out;
+                out << "{"
+                    << "\"status\":\"ok\","
+                    << "\"name\":" << jsonString(portfolio_name)
+                    << "}";
+                return makeJsonResponse(200, out.str());
             }
 
             if (request.method == "GET" && segments.size() == 4 && segments[3] == "stocks")

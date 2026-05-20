@@ -923,3 +923,38 @@ small {
     grid-template-columns: 1fr;
   }
 }
+
+.page-head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.danger-btn {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.danger-btn:hover {
+  background: var(--bad);
+  color: var(--bg);
+}
+
+#deleteAccountDialog {
+  width: min(440px, 94vw);
+}
+
+.confirm-body {
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.confirm-body p {
+  margin: 0 0 10px;
+}
+
+.muted-note {
+  color: var(--muted);
+  font-size: 10pt;
+}

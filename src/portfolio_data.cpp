@@ -16,7 +16,7 @@ namespace
     bool isStockTransactionType(TransactionType tx_type);
     StockEventType toStockEventType(TransactionType tx_type);
 
-    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 2;
+    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 3;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr uint32_t CURRENT_STOCK_FILE_VERSION = 1;
     constexpr uint32_t OLDEST_SUPPORTED_STOCK_FILE_VERSION = 1;
@@ -467,13 +467,21 @@ namespace
 
 // ==================== Portfolio Implementation ====================
 
-Portfolio::Portfolio() 
-    : version(CURRENT_PORTFOLIO_FILE_VERSION), type(PortfolioType::BROKERAGE), available_capital(0.0)
+Portfolio::Portfolio()
+    : version(CURRENT_PORTFOLIO_FILE_VERSION), type(PortfolioType::BROKERAGE),
+      available_capital(0.0), currency("USD")
 {
 }
 
 Portfolio::Portfolio(PortfolioType ptype, double initial_capital)
-    : version(CURRENT_PORTFOLIO_FILE_VERSION), type(ptype), available_capital(initial_capital)
+    : version(CURRENT_PORTFOLIO_FILE_VERSION), type(ptype),
+      available_capital(initial_capital), currency("USD")
+{
+}
+
+Portfolio::Portfolio(PortfolioType ptype, double initial_capital, const std::string& ccy)
+    : version(CURRENT_PORTFOLIO_FILE_VERSION), type(ptype),
+      available_capital(initial_capital), currency(ccy.empty() ? std::string("USD") : ccy)
 {
 }
 
@@ -594,6 +602,9 @@ double Portfolio::getCapitalMovement(time_t start_date, time_t end_date) const
  *   - type: uint8_t (1 byte)
  *   - reserved: 3 bytes (for alignment/future use)
  * Available capital: double (8 bytes)
+ * Currency (v3+):
+ *   - length: uint16_t (2 bytes)
+ *   - bytes (variable, ISO 4217 like "USD", "EUR")
  * Daily values:
  *   - count: uint32_t (4 bytes)
  *   - v1 array: [date (time_t, 8 bytes) + value (double, 8 bytes)] * count
@@ -625,6 +636,21 @@ bool Portfolio::saveToFile(const std::string& filepath) const
 
     // Write available capital
     file.write(reinterpret_cast<const char*>(&available_capital), sizeof(double));
+
+    // Write currency (v3+). Cap length to 16 bytes; treat empty as "USD" on read.
+    {
+        std::string ccy = currency.empty() ? std::string("USD") : currency;
+        if (ccy.length() > 16)
+        {
+            ccy = ccy.substr(0, 16);
+        }
+        uint16_t ccy_length = static_cast<uint16_t>(ccy.length());
+        file.write(reinterpret_cast<const char*>(&ccy_length), sizeof(uint16_t));
+        if (ccy_length > 0)
+        {
+            file.write(ccy.c_str(), ccy_length);
+        }
+    }
 
     // Write daily values
     if (daily_values.size() > std::numeric_limits<uint32_t>::max())
@@ -739,6 +765,36 @@ bool Portfolio::loadFromFile(const std::string& filepath)
     {
         std::cerr << "Error: Corrupt or truncated file (available capital)" << std::endl;
         return false;
+    }
+
+    // Read currency (v3+). Legacy files default to "USD".
+    std::string loaded_currency = "USD";
+    if (loaded_version >= 3)
+    {
+        uint16_t ccy_length;
+        if (!readExact(file, reinterpret_cast<char*>(&ccy_length), sizeof(uint16_t)))
+        {
+            std::cerr << "Error: Corrupt or truncated file (currency length)" << std::endl;
+            return false;
+        }
+        if (ccy_length > 16)
+        {
+            std::cerr << "Error: Currency length exceeds supported limit" << std::endl;
+            return false;
+        }
+        if (ccy_length > 0)
+        {
+            loaded_currency.assign(ccy_length, '\0');
+            if (!readExact(file, &loaded_currency[0], ccy_length))
+            {
+                std::cerr << "Error: Corrupt or truncated file (currency)" << std::endl;
+                return false;
+            }
+        }
+        else
+        {
+            loaded_currency = "USD";
+        }
     }
 
     // Read daily values
@@ -880,6 +936,7 @@ bool Portfolio::loadFromFile(const std::string& filepath)
     version = loaded_version;
     type = static_cast<PortfolioType>(portfolio_type_byte);
     available_capital = loaded_available_capital;
+    currency = loaded_currency;
     daily_values = std::move(loaded_daily_values);
     transactions = std::move(loaded_transactions);
 
@@ -1356,12 +1413,13 @@ PortfolioManager::PortfolioManager(const std::string& data_dir)
     recoverSyncArtifacts(data_directory);
 }
 
-bool PortfolioManager::createPortfolio(const std::string& name, PortfolioType type, double initial_capital)
+bool PortfolioManager::createPortfolio(const std::string& name, PortfolioType type, double initial_capital,
+                                       const std::string& ccy)
 {
     std::string portfolio_dir = getPortfolioPath(name);
     std::string portfolio_file = getPortfolioFilePath(name);
     std::string stocks_dir = getStocksDirectoryPath(name);
-    
+
     try
     {
         // Create portfolio directory
@@ -1380,9 +1438,9 @@ bool PortfolioManager::createPortfolio(const std::string& name, PortfolioType ty
             std::cerr << "Error creating portfolio: portfolio already exists at " << portfolio_file << std::endl;
             return false;
         }
-        
+
         // Create and save portfolio file
-        Portfolio portfolio(type, initial_capital);
+        Portfolio portfolio(type, initial_capital, ccy);
         return savePortfolio(name, portfolio);
     }
     catch (const fs::filesystem_error& e)

@@ -7,9 +7,9 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260520j" />
+  <link rel="stylesheet" href="styles.css?v=20260521b" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
-  <script src="app.js?v=20260520j" defer></script>
+  <script src="app.js?v=20260521b" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -48,7 +48,10 @@
             <p class="eyebrow" id="portfolioType"></p>
             <h2 id="portfolioName">Portfolio</h2>
           </div>
-          <button id="backToDashBtn" class="ghost-btn" type="button">Back to Dashboard</button>
+          <div class="page-head-actions">
+            <button id="deleteAccountBtn" class="ghost-btn danger-btn" type="button">Delete Account</button>
+            <button id="backToDashBtn" class="ghost-btn" type="button">Back to Dashboard</button>
+          </div>
         </div>
 
         <div class="metric-grid" id="portfolioMetrics"></div>
@@ -200,6 +203,28 @@
         </select>
       </div>
 
+      <div id="createPortfolioCurrencyRow" class="field-row" hidden>
+        <label for="createPortfolioCurrency">Currency</label>
+        <select id="createPortfolioCurrency" name="currency" class="graph-period-select">
+          <option value="USD" selected>USD — US Dollar</option>
+          <option value="EUR">EUR — Euro</option>
+          <option value="GBP">GBP — British Pound</option>
+          <option value="JPY">JPY — Japanese Yen</option>
+          <option value="CAD">CAD — Canadian Dollar</option>
+          <option value="AUD">AUD — Australian Dollar</option>
+          <option value="CHF">CHF — Swiss Franc</option>
+          <option value="CNY">CNY — Chinese Yuan</option>
+          <option value="HKD">HKD — Hong Kong Dollar</option>
+          <option value="MXN">MXN — Mexican Peso</option>
+          <option value="OTHER">Other (enter code)</option>
+        </select>
+      </div>
+
+      <div id="createPortfolioCurrencyOtherRow" class="field-row" hidden>
+        <label for="createPortfolioCurrencyOther">ISO Currency Code</label>
+        <input id="createPortfolioCurrencyOther" name="currencyOther" type="text" maxlength="3" placeholder="SEK" autocomplete="off" />
+      </div>
+
       <div id="createPortfolioCapitalRow" class="field-row">
         <label for="createPortfolioCapital">Initial Capital</label>
         <input id="createPortfolioCapital" name="initialCapital" type="number" min="0" step="0.01" value="0" />
@@ -209,6 +234,21 @@
         <button id="createPortfolioSubmitBtn" class="primary-btn" type="submit">Create Account</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="deleteAccountDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h3>Delete Account</h3>
+      <button class="ghost-btn" value="cancel" type="submit">Close</button>
+    </form>
+    <div class="confirm-body">
+      <p>Are you sure you want to delete <strong id="deleteAccountName"></strong>?</p>
+      <p class="muted-note">This permanently removes the account, all its holdings, and its transaction history. This cannot be undone.</p>
+      <div class="row-actions">
+        <button id="deleteAccountCancelBtn" class="ghost-btn" type="button">Cancel</button>
+        <button id="deleteAccountConfirmBtn" class="primary-btn danger-btn" type="button">Delete Account</button>
+      </div>
+    </div>
   </dialog>
 </body>
 </html>
