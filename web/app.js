@@ -2380,13 +2380,24 @@ async function submitTransactionForm(event) {
       payload
     );
 
-    const latestSummary = await apiGet("/api/portfolios");
-    state.portfolios = normalizePortfolios(latestSummary.portfolios);
-    refreshAllTransactionsForDashboard();
-    await openPortfolio(state.currentPortfolio.name);
+    const portfolioName = state.currentPortfolio.name;
     showFlash("Transaction recorded successfully.");
     resetTransactionForm();
     el.transactionDialog.close();
+
+    // /api/portfolios serially fetches a USD FX rate for every non-USD cash
+    // account, which can stall on Yahoo network failures. Refresh in the
+    // background so the dialog isn't blocked on it.
+    (async () => {
+      try {
+        const latestSummary = await apiGet("/api/portfolios");
+        state.portfolios = normalizePortfolios(latestSummary.portfolios);
+        refreshAllTransactionsForDashboard();
+        await openPortfolio(portfolioName);
+      } catch (_) {
+        // best-effort; UI refreshes on next navigation
+      }
+    })();
   } catch (error) {
     showFlash(error.message);
   } finally {

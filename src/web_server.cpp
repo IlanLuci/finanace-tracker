@@ -1131,6 +1131,7 @@ namespace
 
     std::mutex g_live_quote_cache_mutex;
     std::map<std::string, LiveQuoteCacheEntry> g_live_quote_cache;
+    std::map<std::string, time_t> g_live_quote_failure_cache;
     constexpr time_t LIVE_QUOTE_CACHE_TTL_SECONDS = 30;
 
     bool fetchLiveQuotesCached(const std::vector<std::string>& symbols,
@@ -1157,11 +1158,17 @@ namespace
                 (check_time - cached_it->second.cached_at) <= LIVE_QUOTE_CACHE_TTL_SECONDS)
             {
                 out_quotes[normalized] = cached_it->second.quote;
+                continue;
             }
-            else
+            // Skip symbols that recently failed: prevents every request from
+            // re-running an 8s+ curl timeout when Yahoo is unreachable.
+            auto failure_it = g_live_quote_failure_cache.find(normalized);
+            if (failure_it != g_live_quote_failure_cache.end() &&
+                (check_time - failure_it->second) <= LIVE_QUOTE_CACHE_TTL_SECONDS)
             {
-                tickers_to_fetch.push_back(normalized);
+                continue;
             }
+            tickers_to_fetch.push_back(normalized);
         }
 
         if (tickers_to_fetch.empty())
@@ -1170,19 +1177,24 @@ namespace
         }
 
         std::map<std::string, std::tuple<double, time_t, std::string, double>> fresh;
-        if (!fetchYahooLiveQuotes(tickers_to_fetch, fresh, error))
-        {
-            return false;
-        }
-
+        const bool fetch_ok = fetchYahooLiveQuotes(tickers_to_fetch, fresh, error);
         const time_t fetched_at = std::time(nullptr);
+
         for (const auto& entry : fresh)
         {
             g_live_quote_cache[entry.first] = LiveQuoteCacheEntry{entry.second, fetched_at};
+            g_live_quote_failure_cache.erase(entry.first);
             out_quotes[entry.first] = entry.second;
         }
+        for (const std::string& ticker : tickers_to_fetch)
+        {
+            if (fresh.find(ticker) == fresh.end())
+            {
+                g_live_quote_failure_cache[ticker] = fetched_at;
+            }
+        }
 
-        return true;
+        return fetch_ok;
     }
 
     // Returns USD-per-unit of the given foreign currency. USD -> 1.0.
