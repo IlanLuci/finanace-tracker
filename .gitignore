@@ -7,3 +7,4 @@ data/
 
 test_persistence
 .env
+/tools/__pycache__

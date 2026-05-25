@@ -777,22 +777,63 @@ function metricCard(label, value, sub = "") {
 }
 
 function mergeDailySeries(portfolios) {
-  const totalsByDay = new Map();
+  // Each portfolio reports a daily value only on days it had an event
+  // (a market close for brokerages, a transaction or "today" anchor for cash,
+  // every day for crypto). A plain per-day sum therefore drops to a partial
+  // total on days when some portfolios are silent — most visibly on weekends
+  // and market holidays, when brokerages contribute nothing. To produce a
+  // faithful total-asset trend we carry each portfolio's most recent value
+  // forward across the union of days.
+  const dayToSecondsAtClose = (day) => day * 86400 + 16 * 3600;
 
-  portfolios.forEach((portfolio) => {
-    (portfolio.daily_values || []).forEach((point) => {
-      const key = safeNumber(point.date);
-      const value = safeNumber(point.value);
-      if (key <= 0) {
-        return;
-      }
-      totalsByDay.set(key, (totalsByDay.get(key) || 0) + value);
+  const seriesPerPortfolio = (portfolios || []).map((portfolio) => {
+    const points = (portfolio.daily_values || [])
+      .map((point) => ({
+        date: safeNumber(point?.date),
+        value: safeNumber(point?.value)
+      }))
+      .filter((point) => point.date > 0)
+      .sort((a, b) => a.date - b.date);
+
+    // Collapse to one entry per day bucket; later entries (e.g. live-price
+    // patches with the same day but a later timestamp) win.
+    const byDay = new Map();
+    points.forEach((point) => {
+      byDay.set(Math.floor(point.date / 86400), point);
     });
+
+    return Array.from(byDay.entries())
+      .map(([day, point]) => ({ day, value: point.value }))
+      .sort((a, b) => a.day - b.day);
   });
 
-  return Array.from(totalsByDay.entries())
-    .map(([date, value]) => ({ date: Number(date), value }))
-    .sort((a, b) => a.date - b.date);
+  const allDays = new Set();
+  seriesPerPortfolio.forEach((series) => series.forEach((point) => allDays.add(point.day)));
+  const sortedDays = Array.from(allDays).sort((a, b) => a - b);
+
+  const cursors = seriesPerPortfolio.map(() => -1);
+  const out = [];
+
+  sortedDays.forEach((day) => {
+    let total = 0;
+    let anyContrib = false;
+    seriesPerPortfolio.forEach((series, i) => {
+      let c = cursors[i];
+      while (c + 1 < series.length && series[c + 1].day <= day) {
+        c += 1;
+      }
+      cursors[i] = c;
+      if (c >= 0) {
+        total += series[c].value;
+        anyContrib = true;
+      }
+    });
+    if (anyContrib) {
+      out.push({ date: dayToSecondsAtClose(day), value: total });
+    }
+  });
+
+  return out;
 }
 
 function daysForPeriod(period) {
