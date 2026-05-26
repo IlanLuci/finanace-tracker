@@ -138,6 +138,23 @@ public:
     bool loadFromFile(const std::string& filepath);
 };
 
+// Auto-sync connection metadata persisted alongside a portfolio
+// (stored as connection.json in the portfolio directory).
+struct PortfolioConnection
+{
+    std::string provider;          // e.g. "PLAID"
+    std::string institution_name;  // e.g. "Vanguard"
+    std::string institution_id;    // Plaid institution id (e.g. "ins_117181")
+    std::string item_id;           // Plaid item_id
+    std::string access_token;      // Plaid access_token (sensitive)
+    std::string account_id;        // Plaid account_id within the item
+    time_t last_synced;            // unix ts of last successful sync; 0 = never
+    time_t connected_at;           // unix ts the connection was created
+    std::string last_cursor;       // Plaid /transactions/sync cursor (optional)
+
+    PortfolioConnection() : last_synced(0), connected_at(0) {}
+};
+
 // Main Portfolio class
 class Portfolio
 {
@@ -215,6 +232,13 @@ public:
     std::string getPortfolioFilePath(const std::string& name) const;
     std::string getStocksDirectoryPath(const std::string& portfolio_name) const;
     std::string getStockFilePath(const std::string& portfolio_name, const std::string& ticker) const;
+
+    // Connection management (auto-sync via Plaid etc.)
+    std::string getConnectionFilePath(const std::string& portfolio_name) const;
+    bool hasConnection(const std::string& portfolio_name) const;
+    bool loadConnection(const std::string& portfolio_name, PortfolioConnection& connection) const;
+    bool saveConnection(const std::string& portfolio_name, const PortfolioConnection& connection);
+    bool deleteConnection(const std::string& portfolio_name);
 };
 
 #endif

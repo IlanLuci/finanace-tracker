@@ -297,6 +297,9 @@ const el = {
   createPortfolioCurrencyOther: document.getElementById("createPortfolioCurrencyOther"),
   createPortfolioSubmitBtn: document.getElementById("createPortfolioSubmitBtn"),
   deleteAccountBtn: document.getElementById("deleteAccountBtn"),
+  connectAccountBtn: document.getElementById("connectAccountBtn"),
+  syncAccountBtn: document.getElementById("syncAccountBtn"),
+  disconnectAccountBtn: document.getElementById("disconnectAccountBtn"),
   deleteAccountDialog: document.getElementById("deleteAccountDialog"),
   deleteAccountName: document.getElementById("deleteAccountName"),
   deleteAccountCancelBtn: document.getElementById("deleteAccountCancelBtn"),
@@ -518,7 +521,18 @@ function setDashboardMarketStateChip(marketState) {
 
 function setPortfolioLastUpdatedChip(unixSeconds) {
   state.portfolioLastUpdated = safeNumber(unixSeconds);
+  applyPortfolioLastUpdatedChip();
+}
+
+function applyPortfolioLastUpdatedChip() {
   if (!el.portfolioLastUpdatedChip) {
+    return;
+  }
+
+  if (state.portfolioLiveRefreshInFlight) {
+    el.portfolioLastUpdatedChip.hidden = false;
+    el.portfolioLastUpdatedChip.className = "chip chip-refreshing";
+    el.portfolioLastUpdatedChip.textContent = "Refreshing…";
     return;
   }
 
@@ -528,16 +542,25 @@ function setPortfolioLastUpdatedChip(unixSeconds) {
   }
 
   el.portfolioLastUpdatedChip.hidden = false;
-
   el.portfolioLastUpdatedChip.className = "chip chip-neutral";
   el.portfolioLastUpdatedChip.textContent = formatUpdatedLabel(state.portfolioLastUpdated);
 }
 
 function setDashboardLastUpdatedChip(unixSeconds) {
   state.dashboardLastUpdated = safeNumber(unixSeconds);
+  applyDashboardLastUpdatedChip();
+}
 
+function applyDashboardLastUpdatedChip() {
   const chip = document.getElementById("dashboardLastUpdatedChip");
   if (!chip) {
+    return;
+  }
+
+  if (state.dashboardLiveRefreshInFlight) {
+    chip.hidden = false;
+    chip.className = "chip chip-refreshing";
+    chip.textContent = "Refreshing…";
     return;
   }
 
@@ -547,7 +570,6 @@ function setDashboardLastUpdatedChip(unixSeconds) {
   }
 
   chip.hidden = false;
-
   chip.className = "chip chip-neutral";
   chip.textContent = formatUpdatedLabel(state.dashboardLastUpdated);
 }
@@ -570,18 +592,67 @@ function apiUrl(path) {
   return `${state.apiBase}${path}`;
 }
 
-async function apiGet(path) {
-  const response = await fetch(apiUrl(path));
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${response.status}`);
+const PROGRESS_BAR_SHOW_DELAY_MS = 250;
+let inFlightRequests = 0;
+let progressShowTimer = null;
+
+function showProgressBar() {
+  const bar = document.getElementById("globalProgressBar");
+  if (bar) {
+    bar.hidden = false;
   }
-  return data;
+  document.body.setAttribute("aria-busy", "true");
+}
+
+function hideProgressBar() {
+  const bar = document.getElementById("globalProgressBar");
+  if (bar) {
+    bar.hidden = true;
+  }
+  document.body.removeAttribute("aria-busy");
+}
+
+function beginRequest() {
+  inFlightRequests += 1;
+  if (inFlightRequests === 1 && !progressShowTimer) {
+    progressShowTimer = setTimeout(() => {
+      progressShowTimer = null;
+      if (inFlightRequests > 0) {
+        showProgressBar();
+      }
+    }, PROGRESS_BAR_SHOW_DELAY_MS);
+  }
+}
+
+function endRequest() {
+  inFlightRequests = Math.max(0, inFlightRequests - 1);
+  if (inFlightRequests === 0) {
+    if (progressShowTimer) {
+      clearTimeout(progressShowTimer);
+      progressShowTimer = null;
+    }
+    hideProgressBar();
+  }
+}
+
+async function apiGet(path) {
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(path));
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+    return data;
+  } finally {
+    endRequest();
+  }
 }
 
 async function apiGetWithTimeout(path, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  beginRequest();
 
   try {
     const response = await fetch(apiUrl(path), { signal: controller.signal });
@@ -597,37 +668,48 @@ async function apiGetWithTimeout(path, timeoutMs) {
     throw error;
   } finally {
     clearTimeout(timeout);
+    endRequest();
   }
 }
 
 async function apiPost(path, body) {
-  const response = await fetch(apiUrl(path), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
 
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${response.status}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+
+    return data;
+  } finally {
+    endRequest();
   }
-
-  return data;
 }
 
 async function apiDelete(path) {
-  const response = await fetch(apiUrl(path), {
-    method: "DELETE"
-  });
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: "DELETE"
+    });
 
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${response.status}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+
+    return data;
+  } finally {
+    endRequest();
   }
-
-  return data;
 }
 
 function currency(value) {
@@ -636,6 +718,15 @@ function currency(value) {
     currency: "USD",
     maximumFractionDigits: 2
   }).format(value || 0);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function currencyIn(value, code) {
@@ -739,14 +830,16 @@ function portfolioDisplayName(name) {
     .trim();
 }
 
-function showFlash(message) {
+function showFlash(message, kind = "error") {
   el.flash.textContent = message;
   el.flash.hidden = false;
+  el.flash.className = `flash flash-${kind}`;
 }
 
 function hideFlash() {
   el.flash.hidden = true;
   el.flash.textContent = "";
+  el.flash.className = "flash";
 }
 
 function setBreadcrumbs(items) {
@@ -1281,8 +1374,11 @@ function renderDashboard() {
       const pinned = isAccountPinned(p.name);
       const pinIcon = pinned ? "★" : "☆";
       const pinTitle = pinned ? "Unpin" : "Pin to top";
+      const syncBadge = p.is_synced
+        ? `<span class="sync-badge" title="Auto-synced${p.institution_name ? " via " + escapeHtml(p.institution_name) : ""}" aria-label="Auto-synced account">⟳</span>`
+        : "";
       const header = `<div class="stock-top">
-          <strong>${portfolioDisplayName(p.name)}</strong>
+          <strong>${syncBadge}${portfolioDisplayName(p.name)}</strong>
           <span class="card-header-right">
             <span class="chip">${typeLabel(p.type)}</span>
             <button type="button" class="pin-btn${pinned ? " is-pinned" : ""}" data-pin-name="${encodeURIComponent(p.name)}" title="${pinTitle}" aria-label="${pinTitle}">${pinIcon}</button>
@@ -1351,6 +1447,11 @@ function renderDashboard() {
     </section>
     ${renderMonthlyActivity(portfolios, state.allTransactions)}
   `;
+
+  applyDashboardLastUpdatedChip();
+  if (state.dashboardMarketState && state.dashboardMarketState !== "UNKNOWN") {
+    setDashboardMarketStateChip(state.dashboardMarketState);
+  }
 
   const openPortfolioCreateDialogBtn = document.getElementById("openPortfolioCreateDialogBtn");
   if (openPortfolioCreateDialogBtn) {
@@ -1686,10 +1787,29 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     });
   }
 
+  const connection = portfolio.connection || null;
+  const connected = !!connection;
+
+  el.connectAccountBtn.hidden = watchlist || connected;
+  el.syncAccountBtn.hidden = !connected;
+  el.disconnectAccountBtn.hidden = !connected;
+
   if (watchlist) {
     el.openTransactionDialogBtn.hidden = true;
     el.viewAllTransactionsBtn.hidden = true;
     el.recentTransactions.innerHTML = "<p>Transactions are disabled for watchlist portfolios.</p>";
+  } else if (connected) {
+    el.openTransactionDialogBtn.hidden = true;
+    el.viewAllTransactionsBtn.hidden = false;
+    const inst = connection.institution_name || connection.provider || "external provider";
+    const lastSync = connection.last_synced > 0
+      ? new Date(connection.last_synced * 1000).toLocaleString()
+      : "never";
+    const note = `<div class="connection-status">
+      <strong>Auto-synced via ${escapeHtml(inst)}</strong>
+      <span class="sub">Last sync: ${escapeHtml(lastSync)} — manual entry disabled.</span>
+    </div>`;
+    el.recentTransactions.innerHTML = note + renderTransactionTable(recentTransactions);
   } else {
     el.openTransactionDialogBtn.hidden = false;
     el.viewAllTransactionsBtn.hidden = false;
@@ -1737,7 +1857,7 @@ async function addWatchlistSymbol() {
   try {
     await apiPost(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/watchlist`, { ticker });
     await openPortfolio(state.currentPortfolio.name);
-    showFlash(`Added ${ticker} to watchlist.`);
+    showFlash(`Added ${ticker} to watchlist.`, "success");
   } catch (error) {
     showFlash(error.message);
   }
@@ -1757,7 +1877,7 @@ async function removeWatchlistSymbol(ticker) {
     await apiDelete(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/watchlist/${encodeURIComponent(ticker)}`);
     el.stockDialog.close();
     await openPortfolio(state.currentPortfolio.name);
-    showFlash(`Removed ${ticker} from watchlist.`);
+    showFlash(`Removed ${ticker} from watchlist.`, "success");
   } catch (error) {
     showFlash(error.message);
   }
@@ -1903,6 +2023,7 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
   }
 
   state.portfolioLiveRefreshInFlight = true;
+  applyPortfolioLastUpdatedChip();
 
   try {
     const payload = await apiGetWithTimeout(
@@ -1951,6 +2072,7 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
     setPortfolioLastUpdatedChip(0);
   } finally {
     state.portfolioLiveRefreshInFlight = false;
+    applyPortfolioLastUpdatedChip();
   }
 }
 
@@ -1974,6 +2096,7 @@ async function refreshDashboardWithLivePrices() {
   }
 
   state.dashboardLiveRefreshInFlight = true;
+  applyDashboardLastUpdatedChip();
   const requestSeq = ++state.dashboardRefreshRequestSeq;
   const shouldRenderDashboard = !el.dashboardView.hidden && state.activeView === "dashboard";
 
@@ -2061,6 +2184,7 @@ async function refreshDashboardWithLivePrices() {
     setDashboardLastUpdatedChip(0);
   } finally {
     state.dashboardLiveRefreshInFlight = false;
+    applyDashboardLastUpdatedChip();
   }
 }
 
@@ -2422,7 +2546,7 @@ async function submitTransactionForm(event) {
     );
 
     const portfolioName = state.currentPortfolio.name;
-    showFlash("Transaction recorded successfully.");
+    showFlash("Transaction recorded. Refreshing portfolio…", "info");
     resetTransactionForm();
     el.transactionDialog.close();
 
@@ -2435,6 +2559,7 @@ async function submitTransactionForm(event) {
         state.portfolios = normalizePortfolios(latestSummary.portfolios);
         refreshAllTransactionsForDashboard();
         await openPortfolio(portfolioName);
+        showFlash("Transaction recorded successfully.", "success");
       } catch (_) {
         // best-effort; UI refreshes on next navigation
       }
@@ -2523,7 +2648,7 @@ async function submitCreatePortfolioForm(event) {
     await openPortfolio(createdName);
 
     el.createPortfolioDialog.close();
-    showFlash(`Created account ${portfolioDisplayName(createdName)}.`);
+    showFlash(`Created account ${portfolioDisplayName(createdName)}.`, "success");
   } catch (error) {
     showFlash(error.message);
   } finally {
@@ -2555,7 +2680,7 @@ async function confirmDeleteAccount() {
     showDashboard();
 
     el.deleteAccountDialog.close();
-    showFlash(`Deleted account ${portfolioDisplayName(name)}.`);
+    showFlash(`Deleted account ${portfolioDisplayName(name)}.`, "success");
   } catch (error) {
     showFlash(error.message);
   } finally {
@@ -2625,10 +2750,108 @@ function wireEvents() {
   el.deleteAccountBtn.addEventListener("click", openDeleteAccountDialog);
   el.deleteAccountCancelBtn.addEventListener("click", () => el.deleteAccountDialog.close());
   el.deleteAccountConfirmBtn.addEventListener("click", confirmDeleteAccount);
+  el.connectAccountBtn.addEventListener("click", startPlaidConnect);
+  el.syncAccountBtn.addEventListener("click", syncCurrentConnection);
+  el.disconnectAccountBtn.addEventListener("click", disconnectCurrentConnection);
 
   el.apiConfigToggle.addEventListener("click", toggleApiPanel);
   el.apiConfigForm.addEventListener("submit", saveApiBase);
   el.apiResetBtn.addEventListener("click", resetApiBase);
+}
+
+async function startPlaidConnect() {
+  if (!state.currentPortfolio) return;
+  if (typeof Plaid === "undefined" || !Plaid.create) {
+    showFlash("Plaid Link could not load (network or ad blocker?).");
+    return;
+  }
+  const name = state.currentPortfolio.name;
+  try {
+    el.connectAccountBtn.disabled = true;
+    showFlash("Opening Plaid Link…", "info");
+    const resp = await apiPost(`/api/portfolios/${encodeURIComponent(name)}/connection/link-token`, {});
+    hideFlash();
+    const handler = Plaid.create({
+      token: resp.link_token,
+      onSuccess: async (public_token, metadata) => {
+        const accts = Array.isArray(metadata?.accounts) ? metadata.accounts : [];
+        let accountId = accts[0]?.id || "";
+        if (accts.length > 1) {
+          const list = accts
+            .map((a, i) => `${i + 1}. ${a.name || "(unnamed)"} — ${a.subtype || a.type || "?"}${a.mask ? ` …${a.mask}` : ""}`)
+            .join("\n");
+          const raw = window.prompt(
+            `You selected ${accts.length} accounts at this institution.\n` +
+            `Pick which one to link to "${portfolioDisplayName(name)}":\n\n${list}\n\n` +
+            `Enter 1-${accts.length}:`,
+            "1"
+          );
+          if (raw === null) {
+            showFlash("Connection cancelled.", "info");
+            return;
+          }
+          const idx = parseInt(raw, 10) - 1;
+          if (Number.isNaN(idx) || idx < 0 || idx >= accts.length) {
+            showFlash("Invalid choice — connection cancelled.");
+            return;
+          }
+          accountId = accts[idx].id;
+        }
+        try {
+          showFlash("Linking account and importing transactions…", "info");
+          await apiPost(`/api/portfolios/${encodeURIComponent(name)}/connection`, {
+            public_token,
+            account_id: accountId
+          });
+          showFlash("Account connected and synced.", "success");
+          await openPortfolio(name);
+        } catch (e) {
+          showFlash(`Connect failed: ${e.message}`);
+        }
+      },
+      onExit: (err) => {
+        if (err) showFlash(`Plaid Link error: ${err.display_message || err.error_message || err.error_code || "exited"}`);
+      }
+    });
+    handler.open();
+  } catch (e) {
+    showFlash(`Could not start Plaid Link: ${e.message}`);
+  } finally {
+    el.connectAccountBtn.disabled = false;
+  }
+}
+
+async function syncCurrentConnection() {
+  if (!state.currentPortfolio) return;
+  const name = state.currentPortfolio.name;
+  try {
+    el.syncAccountBtn.disabled = true;
+    showFlash("Syncing latest transactions…", "info");
+    const resp = await apiPost(`/api/portfolios/${encodeURIComponent(name)}/connection/sync`, {});
+    showFlash(`Synced ${resp.transactions_imported} transactions.`, "success");
+    await openPortfolio(name);
+  } catch (e) {
+    showFlash(`Sync failed: ${e.message}`);
+  } finally {
+    el.syncAccountBtn.disabled = false;
+  }
+}
+
+async function disconnectCurrentConnection() {
+  if (!state.currentPortfolio) return;
+  const name = state.currentPortfolio.name;
+  const ok = window.confirm(`Disconnect ${portfolioDisplayName(name)}? Existing transactions stay; future syncs stop.`);
+  if (!ok) return;
+  try {
+    el.disconnectAccountBtn.disabled = true;
+    await apiDelete(`/api/portfolios/${encodeURIComponent(name)}/connection`);
+    showFlash("Account disconnected.", "success");
+    await openPortfolio(name);
+  } catch (e) {
+    showFlash(`Disconnect failed: ${e.message}`);
+  } finally {
+    el.disconnectAccountBtn.disabled = false;
+  }
 }
 
 function init() {

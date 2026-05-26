@@ -2001,3 +2001,187 @@ std::string PortfolioManager::getStockFilePath(const std::string& portfolio_name
 {
     return getStocksDirectoryPath(portfolio_name) + "/" + normalizeTicker(ticker) + ".dat";
 }
+
+std::string PortfolioManager::getConnectionFilePath(const std::string& portfolio_name) const
+{
+    return getPortfolioPath(portfolio_name) + "/connection.json";
+}
+
+namespace
+{
+    std::string jsonEscapeString(const std::string& value)
+    {
+        std::string out;
+        out.reserve(value.size() + 2);
+        out.push_back('"');
+        for (unsigned char c : value)
+        {
+            switch (c)
+            {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\b': out += "\\b";  break;
+                case '\f': out += "\\f";  break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if (c < 0x20)
+                    {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                        out += buf;
+                    }
+                    else
+                    {
+                        out.push_back(static_cast<char>(c));
+                    }
+            }
+        }
+        out.push_back('"');
+        return out;
+    }
+
+    // Minimal extractor for one top-level key from a flat JSON object.
+    // Handles string values (with escapes) and bare number values.
+    // Returns empty optional if key is absent or value is not the expected kind.
+    bool jsonExtractStringValue(const std::string& content, const std::string& key, std::string& out_value)
+    {
+        const std::string needle = "\"" + key + "\"";
+        size_t pos = content.find(needle);
+        if (pos == std::string::npos) return false;
+        pos = content.find(':', pos + needle.size());
+        if (pos == std::string::npos) return false;
+        ++pos;
+        while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos]))) ++pos;
+        if (pos >= content.size() || content[pos] != '"') return false;
+        ++pos;
+        out_value.clear();
+        while (pos < content.size() && content[pos] != '"')
+        {
+            char c = content[pos];
+            if (c == '\\' && pos + 1 < content.size())
+            {
+                char next = content[pos + 1];
+                switch (next)
+                {
+                    case '"':  out_value.push_back('"'); break;
+                    case '\\': out_value.push_back('\\'); break;
+                    case '/':  out_value.push_back('/'); break;
+                    case 'b':  out_value.push_back('\b'); break;
+                    case 'f':  out_value.push_back('\f'); break;
+                    case 'n':  out_value.push_back('\n'); break;
+                    case 'r':  out_value.push_back('\r'); break;
+                    case 't':  out_value.push_back('\t'); break;
+                    default:   out_value.push_back(next); break;
+                }
+                pos += 2;
+                continue;
+            }
+            out_value.push_back(c);
+            ++pos;
+        }
+        return true;
+    }
+
+    bool jsonExtractNumberValue(const std::string& content, const std::string& key, long long& out_value)
+    {
+        const std::string needle = "\"" + key + "\"";
+        size_t pos = content.find(needle);
+        if (pos == std::string::npos) return false;
+        pos = content.find(':', pos + needle.size());
+        if (pos == std::string::npos) return false;
+        ++pos;
+        while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos]))) ++pos;
+        if (pos >= content.size()) return false;
+        size_t end = pos;
+        if (content[end] == '-' || content[end] == '+') ++end;
+        while (end < content.size() && std::isdigit(static_cast<unsigned char>(content[end]))) ++end;
+        if (end == pos) return false;
+        try
+        {
+            out_value = std::stoll(content.substr(pos, end - pos));
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+}
+
+bool PortfolioManager::hasConnection(const std::string& portfolio_name) const
+{
+    return fs::exists(getConnectionFilePath(portfolio_name));
+}
+
+bool PortfolioManager::loadConnection(const std::string& portfolio_name, PortfolioConnection& connection) const
+{
+    const std::string path = getConnectionFilePath(portfolio_name);
+    std::ifstream in(path);
+    if (!in.is_open()) return false;
+
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (content.empty()) return false;
+
+    connection = PortfolioConnection();
+    jsonExtractStringValue(content, "provider", connection.provider);
+    jsonExtractStringValue(content, "institution_name", connection.institution_name);
+    jsonExtractStringValue(content, "institution_id", connection.institution_id);
+    jsonExtractStringValue(content, "item_id", connection.item_id);
+    jsonExtractStringValue(content, "access_token", connection.access_token);
+    jsonExtractStringValue(content, "account_id", connection.account_id);
+    jsonExtractStringValue(content, "last_cursor", connection.last_cursor);
+
+    long long ts = 0;
+    if (jsonExtractNumberValue(content, "last_synced", ts)) connection.last_synced = static_cast<time_t>(ts);
+    if (jsonExtractNumberValue(content, "connected_at", ts)) connection.connected_at = static_cast<time_t>(ts);
+
+    return !connection.provider.empty() && !connection.access_token.empty();
+}
+
+bool PortfolioManager::saveConnection(const std::string& portfolio_name, const PortfolioConnection& connection)
+{
+    const std::string portfolio_dir = getPortfolioPath(portfolio_name);
+    if (!fs::exists(portfolio_dir))
+    {
+        std::cerr << "Error saving connection: portfolio does not exist at " << portfolio_dir << std::endl;
+        return false;
+    }
+
+    const std::string path = getConnectionFilePath(portfolio_name);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open())
+    {
+        std::cerr << "Error saving connection: could not open " << path << std::endl;
+        return false;
+    }
+
+    out << "{\n"
+        << "  \"provider\": " << jsonEscapeString(connection.provider) << ",\n"
+        << "  \"institution_name\": " << jsonEscapeString(connection.institution_name) << ",\n"
+        << "  \"institution_id\": " << jsonEscapeString(connection.institution_id) << ",\n"
+        << "  \"item_id\": " << jsonEscapeString(connection.item_id) << ",\n"
+        << "  \"access_token\": " << jsonEscapeString(connection.access_token) << ",\n"
+        << "  \"account_id\": " << jsonEscapeString(connection.account_id) << ",\n"
+        << "  \"last_cursor\": " << jsonEscapeString(connection.last_cursor) << ",\n"
+        << "  \"connected_at\": " << static_cast<long long>(connection.connected_at) << ",\n"
+        << "  \"last_synced\": " << static_cast<long long>(connection.last_synced) << "\n"
+        << "}\n";
+    return out.good();
+}
+
+bool PortfolioManager::deleteConnection(const std::string& portfolio_name)
+{
+    const std::string path = getConnectionFilePath(portfolio_name);
+    if (!fs::exists(path)) return true;
+    try
+    {
+        return fs::remove(path);
+    }
+    catch (const fs::filesystem_error& e)
+    {
+        std::cerr << "Error deleting connection: " << e.what() << std::endl;
+        return false;
+    }
+}

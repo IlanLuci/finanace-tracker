@@ -6,8 +6,8 @@ SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = .
 
-SOURCES = $(SRC_DIR)/main.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/market_data_sync.cpp
-OBJECTS = $(OBJ_DIR)/main.o $(OBJ_DIR)/portfolio_data.o $(OBJ_DIR)/file_utils.o $(OBJ_DIR)/web_server.o $(OBJ_DIR)/market_data_sync.o
+SOURCES = $(SRC_DIR)/main.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/plaid_client.cpp
+OBJECTS = $(OBJ_DIR)/main.o $(OBJ_DIR)/portfolio_data.o $(OBJ_DIR)/file_utils.o $(OBJ_DIR)/web_server.o $(OBJ_DIR)/market_data_sync.o $(OBJ_DIR)/plaid_client.o
 TARGET = $(BIN_DIR)/finance_tracker
 TEST_PERSISTENCE_BIN = $(BIN_DIR)/test_persistence
 

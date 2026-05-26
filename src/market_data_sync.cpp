@@ -602,12 +602,44 @@ namespace MarketDataSync
                 continue;
             }
 
+            // Only add price days at/after the earliest transaction for that ticker.
+            // Otherwise we draw a flat "cash-only" line for periods where the position
+            // didn't exist yet, which is misleading after a Plaid sync.
+            long long ticker_start = std::numeric_limits<long long>::max();
+            for (const auto& tx : txs)
+            {
+                if (normalizeTicker(tx.stock_symbol) != ticker) continue;
+                if (tx.type != TransactionType::BUY_STOCK &&
+                    tx.type != TransactionType::TRANSFER_IN_ASSET &&
+                    tx.type != TransactionType::SELL_STOCK &&
+                    tx.type != TransactionType::TRANSFER_OUT_ASSET &&
+                    tx.type != TransactionType::DIVIDEND)
+                {
+                    continue;
+                }
+                ticker_start = std::min(ticker_start, dayBucket(tx.date));
+            }
+
             for (const auto& point : prices)
             {
-                timeline_days.insert(dayBucket(point.date));
+                const long long d = dayBucket(point.date);
+                if (d < ticker_start) continue;
+                timeline_days.insert(d);
             }
 
             price_tracks[ticker] = PriceTrack{std::move(prices), 0, 0.0};
+        }
+
+        // Clamp the timeline to the earliest transaction across the whole portfolio,
+        // so cash-only periods before any position existed don't show up as a flat
+        // pre-history line. The chart starts where the data actually starts.
+        if (!txs.empty())
+        {
+            const long long portfolio_start = dayBucket(txs.front().date);
+            while (!timeline_days.empty() && *timeline_days.begin() < portfolio_start)
+            {
+                timeline_days.erase(timeline_days.begin());
+            }
         }
 
         if (timeline_days.empty())

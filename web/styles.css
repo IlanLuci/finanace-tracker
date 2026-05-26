@@ -70,6 +70,82 @@ p {
   margin: 0;
 }
 
+.global-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 20;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.global-progress span {
+  display: block;
+  height: 100%;
+  width: 28%;
+  background: var(--hover);
+  animation: progressSlide 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes progressSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(220%);
+  }
+  100% {
+    transform: translateX(420%);
+  }
+}
+
+.chip.chip-refreshing {
+  border-color: var(--hover);
+  color: var(--hover);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chip.chip-refreshing::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--hover);
+  animation: chipPulse 1s ease-in-out infinite;
+}
+
+@keyframes chipPulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+.initial-loading-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11pt;
+}
+
+.loading-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--hover);
+  animation: chipPulse 1s ease-in-out infinite;
+}
+
 .topbar {
   position: sticky;
   top: 0;
@@ -138,6 +214,43 @@ p {
   border: 1px solid var(--bad);
   background: var(--bg);
   color: var(--ink);
+}
+
+.flash.flash-success {
+  border-color: var(--good);
+}
+
+.flash.flash-info {
+  border-color: var(--hover);
+}
+
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--hover);
+  font-size: 1.4em;
+  line-height: 1;
+  cursor: default;
+  transform: translateY(-2px);
+}
+
+.connection-status {
+  border: 1px solid var(--hover);
+  padding: 10px 14px;
+  margin: 0 0 14px;
+  background: var(--bg);
+  display: grid;
+  gap: 4px;
+}
+
+.connection-status strong {
+  color: var(--hover);
+}
+
+.connection-status .sub {
+  color: var(--muted);
+  font-size: 10pt;
 }
 
 .page-head {
@@ -346,6 +459,9 @@ article.stock-card-neutral {
 
 .stock-top strong {
   font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .card-header-right {

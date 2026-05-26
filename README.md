@@ -2,6 +2,16 @@
 
 A C++17 application for tracking brokerage, retirement, cash, crypto, and watchlist accounts with persistent binary storage, a multithreaded HTTP API, and a single-page web UI. Daily close prices are synced from Yahoo Finance and cached on disk.
 
+## Screenshots
+
+### Portfolio overview
+![Portfolio overview — all accounts, total assets, and the aggregate trend chart](https://ilan-not-elon.com/assets/images/asset-tracker-portfolio.png)
+
+### Account detail
+![Account detail — per-portfolio metrics, holdings, and recent transactions](https://ilan-not-elon.com/assets/images/asset-tracker-details.png)
+
+More screenshots and writeup: [ilan-not-elon.com](https://ilan-not-elon.com/).
+
 ## Project Structure
 
 ```

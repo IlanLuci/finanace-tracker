@@ -1,6 +1,7 @@
 #include "web_server.hpp"
 
 #include "market_data_sync.hpp"
+#include "plaid_client.hpp"
 #include "portfolio_data.hpp"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <iostream>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <netinet/in.h>
 #include <optional>
 #include <sstream>
@@ -2026,6 +2028,18 @@ namespace
                                        ? fetchUsdRateForCurrency(ccy_out)
                                        : 1.0;
 
+            // Cheap connection peek for the dashboard (no need to load full token).
+            bool is_synced = manager.hasConnection(name);
+            std::string institution_name;
+            if (is_synced)
+            {
+                PortfolioConnection peek;
+                if (manager.loadConnection(name, peek))
+                {
+                    institution_name = peek.institution_name;
+                }
+            }
+
             out << "{"
                 << "\"name\":" << jsonString(name) << ","
                 << "\"type\":" << jsonString(portfolioTypeToString(portfolio.getType())) << ","
@@ -2038,11 +2052,32 @@ namespace
                 << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
                 << "\"stock_count\":" << manager.listStocks(name).size() << ","
                 << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
+                << "\"is_synced\":" << (is_synced ? "true" : "false") << ","
+                << "\"institution_name\":" << jsonString(institution_name) << ","
                 << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues())
                 << "}";
         }
 
         out << "]}";
+        return out.str();
+    }
+
+    std::string buildConnectionJson(const PortfolioManager& manager, const std::string& portfolio_name)
+    {
+        PortfolioConnection conn;
+        if (!manager.loadConnection(portfolio_name, conn))
+        {
+            return "null";
+        }
+        std::ostringstream out;
+        out << "{"
+            << "\"provider\":" << jsonString(conn.provider) << ","
+            << "\"institution_name\":" << jsonString(conn.institution_name) << ","
+            << "\"institution_id\":" << jsonString(conn.institution_id) << ","
+            << "\"account_id\":" << jsonString(conn.account_id) << ","
+            << "\"connected_at\":" << static_cast<long long>(conn.connected_at) << ","
+            << "\"last_synced\":" << static_cast<long long>(conn.last_synced)
+            << "}";
         return out.str();
     }
 
@@ -2072,7 +2107,8 @@ namespace
             << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
             << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
             << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues()) << ","
-            << "\"transaction_count\":" << portfolio.getTransactions().size()
+            << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
+            << "\"connection\":" << buildConnectionJson(manager, name)
             << "}";
 
         return out.str();
@@ -2679,6 +2715,570 @@ namespace
         return makeJsonResponse(201, out.str());
     }
 
+    std::string formatPlaidDateUTC(time_t t)
+    {
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+        return std::string(buf);
+    }
+
+    // Plaid /transactions/get sign: positive = money OUT. Our sign: positive = cash IN.
+    // So for the cash path, our_amount = -plaid.amount.
+    HttpResponse syncCashAccount(PortfolioManager& manager,
+                                  const std::string& portfolio_name,
+                                  const Plaid::Config& plaid_config,
+                                  PortfolioConnection& conn,
+                                  const std::string& start_date,
+                                  const std::string& end_date,
+                                  const Portfolio& original_portfolio,
+                                  const std::vector<Plaid::AccountSummary>& accounts_summary)
+    {
+        std::vector<Plaid::Transaction> plaid_txs;
+        std::string plaid_error;
+        if (!Plaid::getTransactions(plaid_config, conn.access_token,
+                                    start_date, end_date, plaid_txs, plaid_error))
+        {
+            return makeJsonResponse(502, makeErrorBody("Plaid sync failed: " + plaid_error));
+        }
+
+        std::vector<Plaid::Transaction> filtered;
+        filtered.reserve(plaid_txs.size());
+        for (const auto& tx : plaid_txs)
+        {
+            if (!conn.account_id.empty() && tx.account_id != conn.account_id) continue;
+            if (tx.pending) continue;
+            filtered.push_back(tx);
+        }
+
+        // Anchor available_capital to Plaid's currently reported balance so the
+        // recompute can walk backwards to find historical balances. Fall back to
+        // the transaction sum (legacy behavior) if no balance is available.
+        double anchor_balance = 0.0;
+        bool have_anchor = false;
+        for (const auto& a : accounts_summary)
+        {
+            if (a.account_id == conn.account_id && a.has_balance)
+            {
+                anchor_balance = a.current_balance;
+                have_anchor = true;
+                break;
+            }
+        }
+
+        Portfolio rebuilt(original_portfolio.getType(), 0.0, original_portfolio.getCurrency());
+        double tx_sum = 0.0;
+        for (const auto& tx : filtered)
+        {
+            const double our_amount = -tx.amount;
+            const TransactionType type = (our_amount >= 0.0)
+                ? TransactionType::DEPOSIT
+                : TransactionType::WITHDRAWAL;
+            const std::string display_name = !tx.merchant_name.empty() ? tx.merchant_name : tx.name;
+            rebuilt.addTransaction(tx.date, our_amount, type, display_name);
+            tx_sum += our_amount;
+        }
+        rebuilt.setAvailableCapital(have_anchor ? anchor_balance : tx_sum);
+
+        if (!manager.savePortfolio(portfolio_name, rebuilt))
+        {
+            return makeJsonResponse(500, makeErrorBody("Sync succeeded but failed to save portfolio"));
+        }
+        if (!MarketDataSync::recomputePortfolioDailyValues(manager, portfolio_name))
+        {
+            return makeJsonResponse(500, makeErrorBody("Sync saved but daily totals failed to recompute"));
+        }
+
+        const time_t now = std::time(nullptr);
+        conn.last_synced = now;
+        manager.saveConnection(portfolio_name, conn);
+
+        std::ostringstream out;
+        out << "{"
+            << "\"status\":\"ok\","
+            << "\"portfolio\":" << jsonString(portfolio_name) << ","
+            << "\"account_type\":\"cash\","
+            << "\"transactions_imported\":" << filtered.size() << ","
+            << "\"holdings_imported\":0,"
+            << "\"available_capital\":" << jsonNumber(rebuilt.getAvailableCapital()) << ","
+            << "\"last_synced\":" << static_cast<long long>(now)
+            << "}";
+        return makeJsonResponse(200, out.str());
+    }
+
+    // Plaid /investments/transactions/get sign: positive amount = cash IN (matches our sign).
+    // Plaid quantity: positive = shares received, negative = shares delivered.
+    HttpResponse syncInvestmentAccount(PortfolioManager& manager,
+                                        const std::string& portfolio_name,
+                                        const Plaid::Config& plaid_config,
+                                        PortfolioConnection& conn,
+                                        const std::string& start_date,
+                                        const std::string& end_date,
+                                        const Portfolio& original_portfolio,
+                                        const std::vector<Plaid::AccountSummary>& accounts_summary)
+    {
+        // Pull investment transactions + holdings.
+        std::vector<Plaid::InvestmentTransaction> inv_txs;
+        std::vector<Plaid::Security> securities_a;
+        std::string err;
+        if (!Plaid::getInvestmentTransactions(plaid_config, conn.access_token,
+                                              start_date, end_date,
+                                              inv_txs, securities_a, err))
+        {
+            return makeJsonResponse(502, makeErrorBody("Plaid investments tx sync failed: " + err));
+        }
+
+        std::vector<Plaid::Holding> holdings;
+        std::vector<Plaid::Security> securities_b;
+        if (!Plaid::getHoldings(plaid_config, conn.access_token,
+                                holdings, securities_b, err))
+        {
+            return makeJsonResponse(502, makeErrorBody("Plaid holdings fetch failed: " + err));
+        }
+
+        // Merge securities into one lookup table (security_id -> Security).
+        std::map<std::string, Plaid::Security> sec_by_id;
+        for (const auto& s : securities_a) sec_by_id[s.security_id] = s;
+        for (const auto& s : securities_b) sec_by_id[s.security_id] = s;
+
+        // Treat money-market / settlement funds as cash. Plaid sets is_cash_equivalent
+        // for these; we also keep a known-ticker fallback for brokers that don't set it.
+        static const std::set<std::string> CASH_EQUIV_TICKERS = {
+            "VMFXX", "VUSXX", "VMSXX",                        // Vanguard
+            "SPAXX", "FDRXX", "FCASH", "SPRXX", "FZFXX",      // Fidelity
+            "SWVXX", "SNVXX",                                 // Schwab
+            "TMCXX"                                           // T. Rowe Price
+        };
+        const auto isCashEquivSec = [&](const std::string& security_id) -> bool
+        {
+            auto it = sec_by_id.find(security_id);
+            if (it == sec_by_id.end()) return false;
+            if (it->second.is_cash_equivalent) return true;
+            return CASH_EQUIV_TICKERS.count(it->second.ticker_symbol) > 0;
+        };
+
+        // Filter by connected account
+        const auto matchesAccount = [&conn](const std::string& acct)
+        {
+            return conn.account_id.empty() || acct == conn.account_id;
+        };
+
+        // Wipe existing stocks
+        for (const auto& ticker : manager.listStocks(portfolio_name))
+        {
+            manager.deleteStock(portfolio_name, ticker);
+        }
+
+        // Rebuild portfolio from scratch
+        Portfolio rebuilt(original_portfolio.getType(), 0.0, original_portfolio.getCurrency());
+
+        // Per-ticker StockEvent accumulator (we'll save StockData files after).
+        std::map<std::string, std::vector<StockEvent>> events_by_ticker;
+        std::map<std::string, std::string> company_name_by_ticker;
+        double running_cash = 0.0;
+
+        const auto ensure_ticker = [&](const std::string& security_id) -> std::string
+        {
+            auto it = sec_by_id.find(security_id);
+            if (it == sec_by_id.end()) return "";
+            const std::string& ticker = it->second.ticker_symbol;
+            if (ticker.empty()) return "";
+            if (!company_name_by_ticker.count(ticker))
+            {
+                company_name_by_ticker[ticker] = it->second.name.empty() ? ticker : it->second.name;
+            }
+            return ticker;
+        };
+
+        // Sort investment txs by date so the StockData replay is well-ordered.
+        std::sort(inv_txs.begin(), inv_txs.end(),
+                  [](const Plaid::InvestmentTransaction& a, const Plaid::InvestmentTransaction& b)
+                  { return a.date < b.date; });
+
+        int investment_tx_imported = 0;
+        for (const auto& tx : inv_txs)
+        {
+            if (!matchesAccount(tx.account_id)) continue;
+            if (tx.type == "cancel") continue;
+
+            // Money-market sweeps (VMFXX etc.) are internal cash movements within
+            // the brokerage; ignore them entirely — the holdings step folds their
+            // value into available_capital instead.
+            if (isCashEquivSec(tx.security_id)) continue;
+
+            const std::string ticker = ensure_ticker(tx.security_id);
+            const double abs_shares = std::abs(tx.quantity);
+            // Plaid /investments/transactions/get convention:
+            //   amount > 0 = cash OUT (buys, withdrawals, fees)
+            //   amount < 0 = cash IN  (sells, dividends, deposits, interest)
+            // Our convention: amount > 0 = cash IN. So flip the sign.
+            const double cash = -tx.amount;
+
+            if (tx.type == "buy")
+            {
+                if (ticker.empty() || abs_shares <= 0.0)
+                {
+                    // Money-market sweep / reinvested dividend with no share movement.
+                    // Record as a plain cash flow so available_capital stays accurate.
+                    if (cash != 0.0)
+                    {
+                        const TransactionType ct = cash >= 0.0
+                            ? TransactionType::DEPOSIT
+                            : TransactionType::WITHDRAWAL;
+                        rebuilt.addTransaction(tx.date, cash, ct, tx.name);
+                        running_cash += cash;
+                        ++investment_tx_imported;
+                    }
+                    continue;
+                }
+                rebuilt.addTransaction(tx.date, cash, TransactionType::BUY_STOCK,
+                                       ticker, abs_shares, tx.name);
+                events_by_ticker[ticker].emplace_back(
+                    tx.date, StockEventType::BUY, abs_shares, tx.price, cash, tx.name);
+                running_cash += cash;
+                ++investment_tx_imported;
+            }
+            else if (tx.type == "sell")
+            {
+                if (ticker.empty() || abs_shares <= 0.0)
+                {
+                    if (cash != 0.0)
+                    {
+                        const TransactionType ct = cash >= 0.0
+                            ? TransactionType::DEPOSIT
+                            : TransactionType::WITHDRAWAL;
+                        rebuilt.addTransaction(tx.date, cash, ct, tx.name);
+                        running_cash += cash;
+                        ++investment_tx_imported;
+                    }
+                    continue;
+                }
+                rebuilt.addTransaction(tx.date, cash, TransactionType::SELL_STOCK,
+                                       ticker, abs_shares, tx.name);
+                events_by_ticker[ticker].emplace_back(
+                    tx.date, StockEventType::SELL, abs_shares, tx.price, cash, tx.name);
+                running_cash += cash;
+                ++investment_tx_imported;
+            }
+            else if (tx.type == "cash")
+            {
+                // Subtype-driven mapping
+                if (tx.subtype == "dividend" && !ticker.empty())
+                {
+                    rebuilt.addTransaction(tx.date, cash, TransactionType::DIVIDEND,
+                                           ticker, 0.0, tx.name);
+                    events_by_ticker[ticker].emplace_back(
+                        tx.date, StockEventType::DIVIDEND, 0.0, 0.0, cash, tx.name);
+                }
+                else if (tx.subtype == "interest" || tx.subtype == "interest income")
+                {
+                    rebuilt.addTransaction(tx.date, cash, TransactionType::INTEREST, tx.name);
+                }
+                else if (cash >= 0.0)
+                {
+                    rebuilt.addTransaction(tx.date, cash, TransactionType::DEPOSIT, tx.name);
+                }
+                else
+                {
+                    rebuilt.addTransaction(tx.date, cash, TransactionType::WITHDRAWAL, tx.name);
+                }
+                running_cash += cash;
+                ++investment_tx_imported;
+            }
+            else if (tx.type == "transfer")
+            {
+                if (ticker.empty() || abs_shares <= 0.0) continue;
+                // Share transfer with no cash movement on this side.
+                const TransactionType ttype = (tx.quantity >= 0.0)
+                    ? TransactionType::TRANSFER_IN_ASSET
+                    : TransactionType::TRANSFER_OUT_ASSET;
+                rebuilt.addTransaction(tx.date, 0.0, ttype, ticker, abs_shares, tx.name);
+                // Approximate per-share cost basis as institution_price if available.
+                if (ttype == TransactionType::TRANSFER_IN_ASSET)
+                {
+                    events_by_ticker[ticker].emplace_back(
+                        tx.date, StockEventType::BUY, abs_shares,
+                        tx.price > 0.0 ? tx.price : 0.0, 0.0, tx.name + " (transfer in)");
+                }
+                else
+                {
+                    events_by_ticker[ticker].emplace_back(
+                        tx.date, StockEventType::SELL, abs_shares,
+                        tx.price > 0.0 ? tx.price : 0.0, 0.0, tx.name + " (transfer out)");
+                }
+                ++investment_tx_imported;
+            }
+            else if (tx.type == "fee")
+            {
+                rebuilt.addTransaction(tx.date, cash, TransactionType::WITHDRAWAL, tx.name);
+                running_cash += cash;
+                ++investment_tx_imported;
+            }
+        }
+
+        // Plaid's balances.current on an investment account = total account value
+        // (cash + cash-equiv + stocks), not just settlement cash. To get the actual
+        // available cash (including any cash-equiv sweep funds), subtract the value
+        // of non-cash holdings from the total.
+        double plaid_total_account_value = 0.0;
+        bool have_balance_anchor = false;
+        for (const auto& a : accounts_summary)
+        {
+            if (a.account_id == conn.account_id && a.has_balance)
+            {
+                plaid_total_account_value = a.current_balance;
+                have_balance_anchor = true;
+                break;
+            }
+        }
+
+        double non_cash_holdings_value = 0.0;
+        double cash_equiv_value = 0.0;
+        for (const auto& holding : holdings)
+        {
+            if (!matchesAccount(holding.account_id)) continue;
+            const double val = holding.institution_value > 0.0
+                ? holding.institution_value
+                : holding.quantity * holding.institution_price;
+            if (isCashEquivSec(holding.security_id))
+            {
+                cash_equiv_value += val;
+            }
+            else
+            {
+                non_cash_holdings_value += val;
+            }
+        }
+
+        rebuilt.setAvailableCapital(have_balance_anchor
+            ? plaid_total_account_value - non_cash_holdings_value
+            : running_cash + cash_equiv_value);
+
+        // Plaid only returns ~2 years of transactions, so a ticker may have SELLs
+        // in our window without the matching BUYs (or only holdings with no buys at
+        // all). For each gap, synthesize a paired DEPOSIT + BUY_STOCK at the earliest
+        // possible date. The pair is cash-neutral but produces a labeled "Buy" event
+        // with the correct cost basis, so the holdings table and chart look right.
+        const time_t now = std::time(nullptr);
+        const time_t fallback_synth_date = now - (2LL * 365 * 86400); // 2 years ago
+
+        const auto perShareBasisFromHolding = [&](const std::string& ticker) -> double
+        {
+            for (const auto& h : holdings)
+            {
+                if (!matchesAccount(h.account_id)) continue;
+                auto sit = sec_by_id.find(h.security_id);
+                if (sit == sec_by_id.end()) continue;
+                if (sit->second.ticker_symbol != ticker) continue;
+                if (h.quantity > 0.0 && h.cost_basis > 0.0)
+                {
+                    return h.cost_basis / h.quantity;
+                }
+                if (h.institution_price > 0.0) return h.institution_price;
+                return 0.0;
+            }
+            return 0.0;
+        };
+
+        // Adds a paired DEPOSIT + BUY_STOCK (cash-neutral; produces a real "Buy" event).
+        const auto addSynthBuy = [&](time_t when, const std::string& ticker, double shares,
+                                      double per_share, const std::string& notes)
+        {
+            const double total = per_share * shares;
+            rebuilt.addTransaction(when, total, TransactionType::DEPOSIT, notes);
+            rebuilt.addTransaction(when, -total, TransactionType::BUY_STOCK,
+                                   ticker, shares, notes);
+        };
+
+        // (1) Pre-flight: cover SELLs that drive running shares negative.
+        {
+            std::map<std::string, double> running;
+            std::map<std::string, double> deficit;
+            std::map<std::string, time_t> earliest;
+            std::vector<Transaction> txs = rebuilt.getTransactions();
+            std::sort(txs.begin(), txs.end(),
+                      [](const Transaction& a, const Transaction& b){ return a.date < b.date; });
+            for (const auto& tx : txs)
+            {
+                if (tx.stock_symbol.empty()) continue;
+                const std::string& tk = tx.stock_symbol;
+                if (!earliest.count(tk) || tx.date < earliest[tk]) earliest[tk] = tx.date;
+                if (tx.type == TransactionType::BUY_STOCK ||
+                    tx.type == TransactionType::TRANSFER_IN_ASSET)
+                {
+                    running[tk] += tx.shares;
+                }
+                else if (tx.type == TransactionType::SELL_STOCK ||
+                         tx.type == TransactionType::TRANSFER_OUT_ASSET)
+                {
+                    running[tk] -= tx.shares;
+                    if (running[tk] < 0.0 && -running[tk] > deficit[tk])
+                    {
+                        deficit[tk] = -running[tk];
+                    }
+                }
+            }
+            for (const auto& kv : deficit)
+            {
+                if (kv.second <= 1e-9) continue;
+                const std::string& tk = kv.first;
+                // Plant the synth at the data-window start (or earlier, if earliest
+                // real tx predates the window). Anchoring it 1 day before the first
+                // *recent* Plaid tx for the ticker makes the chart spike right
+                // before that recent activity — but the position itself has been
+                // there since long before our window.
+                time_t when = fallback_synth_date;
+                if (earliest.count(tk) && earliest[tk] - 86400 < when)
+                {
+                    when = earliest[tk] - 86400;
+                }
+                addSynthBuy(when, tk, kv.second, perShareBasisFromHolding(tk),
+                            "Imported from prior history");
+            }
+        }
+
+        // (2) Holdings reconciliation: positions Plaid says we own that aren't in txns.
+        int holdings_imported = 0;
+        for (const auto& holding : holdings)
+        {
+            if (!matchesAccount(holding.account_id)) continue;
+            if (isCashEquivSec(holding.security_id)) continue;
+            auto sec_it = sec_by_id.find(holding.security_id);
+            if (sec_it == sec_by_id.end()) continue;
+            const std::string ticker = sec_it->second.ticker_symbol;
+            if (ticker.empty()) continue;
+
+            double final_shares = 0.0;
+            time_t earliest = now;
+            bool earliest_set = false;
+            for (const auto& tx : rebuilt.getTransactions())
+            {
+                if (tx.stock_symbol != ticker) continue;
+                if (!earliest_set || tx.date < earliest) { earliest = tx.date; earliest_set = true; }
+                if (tx.type == TransactionType::BUY_STOCK ||
+                    tx.type == TransactionType::TRANSFER_IN_ASSET)
+                {
+                    final_shares += tx.shares;
+                }
+                else if (tx.type == TransactionType::SELL_STOCK ||
+                         tx.type == TransactionType::TRANSFER_OUT_ASSET)
+                {
+                    final_shares -= tx.shares;
+                }
+            }
+            const double diff = holding.quantity - final_shares;
+            if (std::abs(diff) > 1e-6)
+            {
+                if (diff > 0.0)
+                {
+                    // Place the synth at the start of our data window, NOT next to the
+                    // first real tx for this ticker — that real tx is often a small
+                    // recent add-on to a position the user has actually held for years,
+                    // and placing the synth there makes the chart show the holding
+                    // "materializing" right before that add-on.
+                    time_t when = fallback_synth_date;
+                    if (earliest_set && earliest - 86400 < when) when = earliest - 86400;
+                    addSynthBuy(when, ticker, diff, perShareBasisFromHolding(ticker),
+                                "Imported from prior history");
+                }
+                else
+                {
+                    // Excess shares we somehow tracked but Plaid says we don't own — rare.
+                    rebuilt.addTransaction(now, 0.0,
+                                           TransactionType::TRANSFER_OUT_ASSET,
+                                           ticker, -diff, "Reconciled from Plaid holdings");
+                }
+            }
+            ++holdings_imported;
+        }
+
+        if (!manager.savePortfolio(portfolio_name, rebuilt))
+        {
+            return makeJsonResponse(500, makeErrorBody("Sync succeeded but failed to save portfolio"));
+        }
+
+        // Fetch live + historical prices for the new tickers, then recompute daily values.
+        const MarketDataSync::SyncConfig sync_config = MarketDataSync::configFromEnvironment();
+        MarketDataSync::syncPortfolio(manager, portfolio_name, sync_config);
+        MarketDataSync::recomputePortfolioDailyValues(manager, portfolio_name);
+
+        conn.last_synced = now;
+        manager.saveConnection(portfolio_name, conn);
+
+        std::ostringstream out;
+        out << "{"
+            << "\"status\":\"ok\","
+            << "\"portfolio\":" << jsonString(portfolio_name) << ","
+            << "\"account_type\":\"investment\","
+            << "\"transactions_imported\":" << investment_tx_imported << ","
+            << "\"holdings_imported\":" << holdings_imported << ","
+            << "\"available_capital\":" << jsonNumber(running_cash) << ","
+            << "\"last_synced\":" << static_cast<long long>(now)
+            << "}";
+        return makeJsonResponse(200, out.str());
+    }
+
+    HttpResponse syncPortfolioFromConnection(PortfolioManager& manager,
+                                              const std::string& portfolio_name)
+    {
+        Portfolio portfolio;
+        if (!manager.loadPortfolio(portfolio_name, portfolio))
+        {
+            return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+        }
+
+        PortfolioConnection conn;
+        if (!manager.loadConnection(portfolio_name, conn))
+        {
+            return makeJsonResponse(404, makeErrorBody("No connection configured for this account"));
+        }
+
+        const Plaid::Config plaid_config = Plaid::configFromEnvironment();
+        if (!Plaid::isConfigured(plaid_config))
+        {
+            return makeJsonResponse(500, makeErrorBody("Plaid not configured on server (PLAID_CLIENT_ID / PLAID_SECRET)"));
+        }
+
+        const time_t now = std::time(nullptr);
+        const time_t three_years_ago = now - (3LL * 365 * 86400);
+        const std::string start_date = formatPlaidDateUTC(three_years_ago);
+        const std::string end_date = formatPlaidDateUTC(now);
+
+        // Look up the connected account's type so we know which sync path to take.
+        std::vector<Plaid::AccountSummary> accounts;
+        std::string ignored_inst_name, ignored_inst_id;
+        std::string err;
+        if (!Plaid::getAccounts(plaid_config, conn.access_token,
+                                accounts, ignored_inst_name, ignored_inst_id, err))
+        {
+            return makeJsonResponse(502, makeErrorBody("Plaid accounts lookup failed: " + err));
+        }
+
+        std::string account_type;
+        for (const auto& a : accounts)
+        {
+            if (a.account_id == conn.account_id)
+            {
+                account_type = a.type;
+                break;
+            }
+        }
+        if (account_type.empty() && !accounts.empty())
+        {
+            account_type = accounts.front().type;
+        }
+
+        if (account_type == "investment")
+        {
+            return syncInvestmentAccount(manager, portfolio_name, plaid_config, conn,
+                                          start_date, end_date, portfolio, accounts);
+        }
+        return syncCashAccount(manager, portfolio_name, plaid_config, conn,
+                                start_date, end_date, portfolio, accounts);
+    }
+
     HttpResponse routeRequest(const HttpRequest& request, PortfolioManager& manager)
     {
         if (request.method == "OPTIONS")
@@ -3180,6 +3780,11 @@ namespace
                     return makeJsonResponse(409, makeErrorBody("Transactions are disabled for WATCHLIST portfolios"));
                 }
 
+                if (manager.hasConnection(portfolio_name))
+                {
+                    return makeJsonResponse(409, makeErrorBody("Manual transactions are disabled for auto-synced accounts. Use Sync Now or Disconnect first."));
+                }
+
                 JsonValue body;
                 HttpResponse parse_error = parseJsonBodyObject(request, body);
                 if (parse_error.status != 200)
@@ -3383,6 +3988,153 @@ namespace
                 }
 
                 return makeJsonResponse(404, makeErrorBody("Unknown transaction action"));
+            }
+
+            // -------- Auto-sync connection routes --------
+
+            if (segments.size() == 5 && segments[3] == "connection" && segments[4] == "link-token")
+            {
+                if (request.method != "POST")
+                {
+                    return makeJsonResponse(405, makeErrorBody("Method not allowed"));
+                }
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+                const Plaid::Config plaid_config = Plaid::configFromEnvironment();
+                if (!Plaid::isConfigured(plaid_config))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Plaid not configured on server (PLAID_CLIENT_ID / PLAID_SECRET)"));
+                }
+                std::string link_token;
+                std::string err;
+                if (!Plaid::createLinkToken(plaid_config, "user-" + portfolio_name, link_token, err))
+                {
+                    return makeJsonResponse(502, makeErrorBody("Plaid link token error: " + err));
+                }
+                std::ostringstream out;
+                out << "{"
+                    << "\"link_token\":" << jsonString(link_token) << ","
+                    << "\"environment\":" << jsonString(plaid_config.environment)
+                    << "}";
+                return makeJsonResponse(200, out.str());
+            }
+
+            if (segments.size() == 5 && segments[3] == "connection" && segments[4] == "sync")
+            {
+                if (request.method != "POST")
+                {
+                    return makeJsonResponse(405, makeErrorBody("Method not allowed"));
+                }
+                return syncPortfolioFromConnection(manager, portfolio_name);
+            }
+
+            if (segments.size() == 4 && segments[3] == "connection")
+            {
+                if (request.method == "GET")
+                {
+                    return makeJsonResponse(200, buildConnectionJson(manager, portfolio_name));
+                }
+                if (request.method == "DELETE")
+                {
+                    if (!manager.hasConnection(portfolio_name))
+                    {
+                        return makeJsonResponse(404, makeErrorBody("No connection to delete"));
+                    }
+                    if (!manager.deleteConnection(portfolio_name))
+                    {
+                        return makeJsonResponse(500, makeErrorBody("Failed to delete connection"));
+                    }
+                    return makeJsonResponse(200, "{\"status\":\"ok\"}");
+                }
+                if (request.method == "POST")
+                {
+                    Portfolio portfolio;
+                    if (!manager.loadPortfolio(portfolio_name, portfolio))
+                    {
+                        return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                    }
+                    JsonValue body;
+                    HttpResponse parse_error = parseJsonBodyObject(request, body);
+                    if (parse_error.status != 200)
+                    {
+                        return parse_error;
+                    }
+                    auto public_token = getObjectString(body, "public_token");
+                    if (!public_token.has_value() || public_token->empty())
+                    {
+                        return makeJsonResponse(400, makeErrorBody("public_token is required"));
+                    }
+                    auto requested_account = getObjectString(body, "account_id").value_or("");
+
+                    const Plaid::Config plaid_config = Plaid::configFromEnvironment();
+                    if (!Plaid::isConfigured(plaid_config))
+                    {
+                        return makeJsonResponse(500, makeErrorBody("Plaid not configured on server"));
+                    }
+                    std::string access_token;
+                    std::string item_id;
+                    std::string err;
+                    if (!Plaid::exchangePublicToken(plaid_config, public_token.value(), access_token, item_id, err))
+                    {
+                        return makeJsonResponse(502, makeErrorBody("Plaid exchange failed: " + err));
+                    }
+                    std::vector<Plaid::AccountSummary> accounts;
+                    std::string institution_name;
+                    std::string institution_id;
+                    if (!Plaid::getAccounts(plaid_config, access_token, accounts, institution_name, institution_id, err))
+                    {
+                        return makeJsonResponse(502, makeErrorBody("Plaid accounts fetch failed: " + err));
+                    }
+                    if (accounts.empty())
+                    {
+                        return makeJsonResponse(502, makeErrorBody("No accounts returned by Plaid"));
+                    }
+                    std::string chosen_account_id = requested_account;
+                    if (chosen_account_id.empty()) chosen_account_id = accounts.front().account_id;
+
+                    PortfolioConnection conn;
+                    conn.provider = "PLAID";
+                    conn.institution_name = institution_name;
+                    conn.institution_id = institution_id;
+                    conn.item_id = item_id;
+                    conn.access_token = access_token;
+                    conn.account_id = chosen_account_id;
+                    conn.connected_at = std::time(nullptr);
+                    conn.last_synced = 0;
+                    if (!manager.saveConnection(portfolio_name, conn))
+                    {
+                        return makeJsonResponse(500, makeErrorBody("Failed to persist connection"));
+                    }
+
+                    // Immediately sync — this wipes existing transactions and pulls fresh from Plaid.
+                    HttpResponse sync_resp = syncPortfolioFromConnection(manager, portfolio_name);
+                    if (sync_resp.status >= 200 && sync_resp.status < 300)
+                    {
+                        std::ostringstream out;
+                        out << "{"
+                            << "\"status\":\"ok\","
+                            << "\"connection\":" << buildConnectionJson(manager, portfolio_name) << ","
+                            << "\"accounts\":[";
+                        for (size_t i = 0; i < accounts.size(); ++i)
+                        {
+                            if (i > 0) out << ",";
+                            out << "{"
+                                << "\"account_id\":" << jsonString(accounts[i].account_id) << ","
+                                << "\"name\":" << jsonString(accounts[i].name) << ","
+                                << "\"type\":" << jsonString(accounts[i].type) << ","
+                                << "\"subtype\":" << jsonString(accounts[i].subtype) << ","
+                                << "\"mask\":" << jsonString(accounts[i].mask)
+                                << "}";
+                        }
+                        out << "]}";
+                        return makeJsonResponse(201, out.str());
+                    }
+                    return sync_resp;
+                }
+                return makeJsonResponse(405, makeErrorBody("Method not allowed"));
             }
         }
 

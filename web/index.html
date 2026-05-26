@@ -7,11 +7,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260521b" />
+  <link rel="stylesheet" href="styles.css?v=20260526h" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
-  <script src="app.js?v=20260521b" defer></script>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
+  <script src="app.js?v=20260526e" defer></script>
 </head>
 <body>
+  <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
   <header class="topbar">
     <div class="brand">
       <p class="brand-kicker">Finances</p>
@@ -40,7 +42,12 @@
 
       <section id="flash" class="flash" hidden></section>
 
-      <section id="dashboardView" class="view"></section>
+      <section id="dashboardView" class="view">
+        <article class="panel initial-loading-state" id="initialLoadingState">
+          <span class="loading-dot" aria-hidden="true"></span>
+          <span>Loading your accounts…</span>
+        </article>
+      </section>
 
       <section id="portfolioView" class="view" hidden>
         <div class="page-head">
@@ -49,6 +56,9 @@
             <h2 id="portfolioName">Portfolio</h2>
           </div>
           <div class="page-head-actions">
+            <button id="connectAccountBtn" class="primary-btn" type="button">Connect Account</button>
+            <button id="syncAccountBtn" class="ghost-btn" type="button" hidden>Sync Now</button>
+            <button id="disconnectAccountBtn" class="ghost-btn" type="button" hidden>Disconnect</button>
             <button id="deleteAccountBtn" class="ghost-btn danger-btn" type="button">Delete Account</button>
             <button id="backToDashBtn" class="ghost-btn" type="button">Back to Dashboard</button>
           </div>
