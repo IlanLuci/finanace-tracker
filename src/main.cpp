@@ -111,6 +111,9 @@ void printPortfolioInfo(const Portfolio& portfolio)
         case PortfolioType::CRYPTO:
             std::cout << "Type: Crypto" << std::endl;
             break;
+        case PortfolioType::DEBT:
+            std::cout << "Type: Debt" << std::endl;
+            break;
     }
     
     std::cout << "Available Capital: " << FileUtils::formatCurrency(portfolio.getAvailableCapital()) << std::endl;

@@ -356,6 +356,39 @@ p {
   color: var(--muted);
 }
 
+.chip-transfer {
+  border-color: var(--accent, #2f6feb);
+  color: var(--accent, #2f6feb);
+  font-size: 9pt;
+  padding: 2px 6px;
+}
+
+.chip-category {
+  border-color: var(--line);
+  color: var(--muted);
+  font-size: 9pt;
+  padding: 2px 6px;
+}
+
+/* Color-code the Plaid PFC primary categories. Each rule paints both the
+   border and the text in a pastel tied to the spend domain. */
+.chip-category.cat-income                    { border-color: #1b8b68; color: #1b8b68; background: #e6f4ee; }
+.chip-category.cat-transfer-in               { border-color: #2f6feb; color: #2f6feb; background: #e8eefd; }
+.chip-category.cat-transfer-out              { border-color: #2f6feb; color: #2f6feb; background: #e8eefd; }
+.chip-category.cat-loan-payments             { border-color: #9b59b6; color: #6e3a85; background: #f1e6f7; }
+.chip-category.cat-bank-fees                 { border-color: #c34b3d; color: #c34b3d; background: #fbe9e6; }
+.chip-category.cat-entertainment             { border-color: #d36cb3; color: #b04489; background: #fbe6f1; }
+.chip-category.cat-food-and-drink            { border-color: #d97706; color: #b25b00; background: #fcefdd; }
+.chip-category.cat-general-merchandise       { border-color: #e2a83a; color: #8a6011; background: #fbf2dc; }
+.chip-category.cat-home-improvement          { border-color: #846b48; color: #5c4a32; background: #efe8db; }
+.chip-category.cat-medical                   { border-color: #e74c3c; color: #b73121; background: #fde7e4; }
+.chip-category.cat-personal-care             { border-color: #b48cd1; color: #6a4990; background: #f0e6f7; }
+.chip-category.cat-general-services          { border-color: #5b8fb9; color: #355d80; background: #e6eef6; }
+.chip-category.cat-government-and-non-profit { border-color: #6a7a8a; color: #41525f; background: #ebeef2; }
+.chip-category.cat-transportation            { border-color: #2c8fb3; color: #1d6483; background: #e0eff5; }
+.chip-category.cat-travel                    { border-color: #1c8a99; color: #126570; background: #def0f1; }
+.chip-category.cat-rent-and-utilities        { border-color: #5a4fcf; color: #3a319e; background: #e8e7fa; }
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

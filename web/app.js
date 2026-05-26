@@ -16,7 +16,7 @@ function setChartPeriod(name, value) {
   localStorage.setItem(CHART_PERIOD_KEY_PREFIX + name, value);
 }
 
-const TYPE_SORT_ORDER = ["BROKERAGE", "ROTH_IRA", "TRADITIONAL_IRA", "CRYPTO", "CASH", "WATCHLIST"];
+const TYPE_SORT_ORDER = ["BROKERAGE", "ROTH_IRA", "TRADITIONAL_IRA", "CRYPTO", "CASH", "DEBT", "WATCHLIST"];
 
 function getPinnedAccounts() {
   try {
@@ -262,7 +262,8 @@ const state = {
   },
   stocksSort: { key: null, dir: null },
   allTransactions: {},
-  monthlyShowAll: false
+  monthlyShowAll: false,
+  inTransit: { total: 0, entries: [] }
 };
 
 const el = {
@@ -742,6 +743,81 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+// Plaid PFC categories arrive as SCREAMING_SNAKE_CASE (e.g.
+// "FOOD_AND_DRINK_COFFEE"). Map down to one of the ~16 primary groups so
+// every transaction renders as a small set of color-coded chips rather than
+// a long-tail of one-off labels.
+const PFC_PRIMARIES = [
+  "INCOME",
+  "TRANSFER_IN",
+  "TRANSFER_OUT",
+  "LOAN_PAYMENTS",
+  "BANK_FEES",
+  "ENTERTAINMENT",
+  "FOOD_AND_DRINK",
+  "GENERAL_MERCHANDISE",
+  "HOME_IMPROVEMENT",
+  "MEDICAL",
+  "PERSONAL_CARE",
+  "GENERAL_SERVICES",
+  "GOVERNMENT_AND_NON_PROFIT",
+  "TRANSPORTATION",
+  "TRAVEL",
+  "RENT_AND_UTILITIES"
+];
+
+const PFC_PRIMARY_LABELS = {
+  INCOME: "Income",
+  TRANSFER_IN: "Transfer In",
+  TRANSFER_OUT: "Transfer Out",
+  LOAN_PAYMENTS: "Loan",
+  BANK_FEES: "Fees",
+  ENTERTAINMENT: "Entertainment",
+  FOOD_AND_DRINK: "Food & Drink",
+  GENERAL_MERCHANDISE: "Shopping",
+  HOME_IMPROVEMENT: "Home",
+  MEDICAL: "Medical",
+  PERSONAL_CARE: "Personal Care",
+  GENERAL_SERVICES: "Services",
+  GOVERNMENT_AND_NON_PROFIT: "Gov / Non-profit",
+  TRANSPORTATION: "Transport",
+  TRAVEL: "Travel",
+  RENT_AND_UTILITIES: "Rent & Utilities"
+};
+
+function categoryPrimary(raw) {
+  if (!raw) return "";
+  const upper = String(raw).toUpperCase();
+  for (const p of PFC_PRIMARIES) {
+    if (upper === p || upper.startsWith(p + "_")) return p;
+  }
+  return upper;
+}
+
+function categoryChipClass(primary) {
+  return primary ? `cat-${primary.toLowerCase().replace(/_/g, "-")}` : "";
+}
+
+function categoryChip(raw) {
+  if (!raw) return "";
+  const primary = categoryPrimary(raw);
+  // Credit-card payments are inflows that just pay down the card balance —
+  // they aren't a spend category, so render no chip for them.
+  if (primary === "LOAN_PAYMENTS") return "";
+  const label = PFC_PRIMARY_LABELS[primary] || prettifyCategory(primary);
+  return `<span class="chip chip-category ${categoryChipClass(primary)}" title="${escapeHtml(raw)}">${escapeHtml(label)}</span>`;
+}
+
+function prettifyCategory(raw) {
+  if (!raw) return "";
+  return String(raw)
+    .toLowerCase()
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 function currencyIn(value, code) {
   const ccy = String(code || "USD").toUpperCase();
   try {
@@ -893,10 +969,13 @@ function mergeDailySeries(portfolios) {
   const dayToSecondsAtClose = (day) => day * 86400 + 16 * 3600;
 
   const seriesPerPortfolio = (portfolios || []).map((portfolio) => {
+    // DEBT portfolios reduce overall totals, so flip their stored balance
+    // series to a negative contribution when building the aggregate.
+    const sign = isDebtPortfolio(portfolio) ? -1 : 1;
     const points = (portfolio.daily_values || [])
       .map((point) => ({
         date: safeNumber(point?.date),
-        value: safeNumber(point?.value)
+        value: safeNumber(point?.value) * sign
       }))
       .filter((point) => point.date > 0)
       .sort((a, b) => a.date - b.date);
@@ -1087,6 +1166,10 @@ function isCashPortfolio(portfolio) {
 
 function isCryptoPortfolio(portfolio) {
   return String(portfolio?.type || "").toUpperCase() === "CRYPTO";
+}
+
+function isDebtPortfolio(portfolio) {
+  return String(portfolio?.type || "").toUpperCase() === "DEBT";
 }
 
 function periodSelectMarkup(selectId, selectedPeriod) {
@@ -1288,7 +1371,7 @@ function allocationPalette(size) {
 }
 
 function renderTransactionTable(transactions, options = {}) {
-  const { showNotes = false } = options;
+  const { showNotes = false, hideTickerShares = false } = options;
   if (!transactions.length) {
     return "<p>No transactions yet.</p>";
   }
@@ -1303,12 +1386,21 @@ function renderTransactionTable(transactions, options = {}) {
       const profitMarkup = hasProfit
         ? ` <span class="${tx.realized_profit >= 0 ? "positive" : "negative"}">(${tx.realized_profit >= 0 ? "+" : ""}${currency(tx.realized_profit)})</span>`
         : "";
-      const notesCell = showNotes ? `<td>${tx.notes || "-"}</td>` : "";
+      const rawNotes = tx.notes || "";
+      const isTransfer = rawNotes.startsWith("[TXFR] ");
+      const cleanedNotes = isTransfer ? rawNotes.slice(7) : rawNotes;
+      const transferBadge = isTransfer
+        ? `<span class="chip chip-transfer" title="Identified as a transfer between connected accounts">Transfer</span> `
+        : "";
+      const catBadge = tx.category ? categoryChip(tx.category) + " " : "";
+      const tickerSharesCells = hideTickerShares ? "" : `<td>${symbol}</td><td>${shares}</td>`;
+      const notesCell = showNotes
+        ? `<td>${transferBadge}${catBadge}${cleanedNotes || "-"}</td>`
+        : "";
       return `<tr>
         <td>${dateLabel(tx.date)}</td>
         <td>${typeLabel(tx.type)}${profitMarkup}</td>
-        <td>${symbol}</td>
-        <td>${shares}</td>
+        ${tickerSharesCells}
         <td class="${amountClass}">${currency(tx.amount)}</td>
         ${notesCell}
       </tr>`;
@@ -1316,12 +1408,12 @@ function renderTransactionTable(transactions, options = {}) {
     .join("");
 
   const notesHeader = showNotes ? "<th>Notes</th>" : "";
+  const tickerSharesHeaders = hideTickerShares ? "" : "<th>Ticker</th><th>Shares</th>";
   return `<table class="tx-table"><thead>
     <tr>
       <th>Date</th>
       <th>Type</th>
-      <th>Ticker</th>
-      <th>Shares</th>
+      ${tickerSharesHeaders}
       <th>Amount</th>
       ${notesHeader}
     </tr>
@@ -1334,12 +1426,23 @@ function renderDashboard() {
 
   const accountPortfolios = portfolios.filter((p) => !isWatchlistPortfolio(p));
 
-  const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  // DEBT accounts contribute a negative estimated_total_value (set server-side),
+  // so the same reduce naturally subtracts outstanding balances from totals.
+  const rawTotalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  // Add back money that's left a source account but hasn't yet posted to the
+  // destination connected account — otherwise total assets dips temporarily.
+  const inTransitTotal = Number(state.inTransit?.total) || 0;
+  const totalAssets = rawTotalAssets + inTransitTotal;
   // Convert each account's native-currency cash to USD before summing so foreign
-  // cash accounts contribute correctly to the dashboard total.
+  // cash accounts contribute correctly to the dashboard total. DEBT accounts
+  // aren't cash and shouldn't inflate the cash metric.
   const totalCash = accountPortfolios.reduce((sum, p) => {
+    if (isDebtPortfolio(p)) return sum;
     const fx = (p.currency && p.currency !== "USD") ? (p.fx_to_usd || 1) : 1;
     return sum + (p.available_capital || 0) * fx;
+  }, 0);
+  const totalDebt = accountPortfolios.reduce((sum, p) => {
+    return sum + (isDebtPortfolio(p) ? (p.available_capital || 0) : 0);
   }, 0);
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
@@ -1355,11 +1458,20 @@ function renderDashboard() {
     ? (totalDayChange / previousDayTotal) * 100
     : 0;
 
+  const accountCountSub = `${accountPortfolios.length} account${accountPortfolios.length === 1 ? "" : "s"}`;
+  const totalAssetsSub = inTransitTotal > 0
+    ? `Incl. ${currency(inTransitTotal)} in transit between accounts`
+    : (totalDebt > 0 ? `Net of ${currency(totalDebt)} debt` : accountCountSub);
+  const debtCard = totalDebt > 0
+    ? metricCard("Total Debt", currency(totalDebt), "Subtracted from Total Assets")
+    : "";
+
   const dashboardMetrics = `<section class="metric-grid">
-    ${metricCard("Total Assets", currency(totalAssets), `${accountPortfolios.length} account portfolio${accountPortfolios.length === 1 ? "" : "s"}`)}
+    ${metricCard("Total Assets", currency(totalAssets), totalAssetsSub)}
     ${metricCard("Day Change", signedCurrency(totalDayChange), `${percentage(totalDayChangePercent)} vs previous close`)}
-    ${metricCard("Total Available Cash", currency(totalCash), "Across account portfolios")}
+    ${metricCard("Total Available Cash", currency(totalCash), "Across accounts")}
     ${metricCard("Total Positions", String(totalStocks), "Stocks and crypto across accounts")}
+    ${debtCard}
   </section>`;
 
   const currentFilter = getAccountFilter();
@@ -1373,6 +1485,7 @@ function renderDashboard() {
     { value: "TRADITIONAL_IRA", label: "Traditional IRA" },
     { value: "CRYPTO", label: "Crypto" },
     { value: "CASH", label: "Cash" },
+    { value: "DEBT", label: "Debt" },
     { value: "WATCHLIST", label: "Watchlist" }
   ];
   const filterMarkup = `<select id="accountFilterSelect" class="graph-period-select" aria-label="Filter accounts by type">${
@@ -1409,6 +1522,10 @@ function renderDashboard() {
           : "";
         body = `<div>${native}</div>
                 ${usdEquiv}
+                <div class="sub">${p.transaction_count} transaction${p.transaction_count === 1 ? "" : "s"}</div>`;
+      } else if (isDebtPortfolio(p)) {
+        body = `<div>${currency(p.available_capital)} owed</div>
+                <div class="sub">Subtracted from totals</div>
                 <div class="sub">${p.transaction_count} transaction${p.transaction_count === 1 ? "" : "s"}</div>`;
       } else {
         body = `<div>${currency(p.estimated_total_value)}</div>
@@ -1671,6 +1788,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const watchlist = isWatchlistPortfolio(portfolio);
   const cash = isCashPortfolio(portfolio);
   const crypto = isCryptoPortfolio(portfolio);
+  const debt = isDebtPortfolio(portfolio);
   const holdingNoun = crypto ? "coin" : (watchlist ? "symbol" : "stock");
   const visibleStocks = watchlist
     ? stocks
@@ -1678,10 +1796,15 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
   el.portfolioName.textContent = portfolioDisplayName(portfolio.name);
   el.portfolioType.textContent = typeLabel(portfolio.type);
-  if (cash) {
+  if (cash || debt) {
     el.stockCount.textContent = `${portfolio.transaction_count || 0} transaction${(portfolio.transaction_count || 0) === 1 ? "" : "s"}`;
   } else {
     el.stockCount.textContent = `${visibleStocks.length} ${holdingNoun}${visibleStocks.length === 1 ? "" : "s"}`;
+  }
+  // Cash and debt accounts don't track market data, so the market-state chip
+  // isn't meaningful for them.
+  if (el.marketStateChip) {
+    el.marketStateChip.hidden = cash || debt;
   }
 
   const stocksHeading = document.getElementById("stocksPanelHeading");
@@ -1714,6 +1837,12 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
       metricCard("Day Change", signedCurrency(portfolio.day_change_amount), `${percentage(portfolio.day_change_percent)} vs previous close`),
       metricCard("Transactions", String(portfolio.transaction_count || 0))
     ].join("");
+  } else if (debt) {
+    el.portfolioMetrics.hidden = false;
+    el.portfolioMetrics.innerHTML = [
+      metricCard("Current Debt", currency(portfolio.available_capital), "Subtracted from Total Assets"),
+      metricCard("Transactions", String(portfolio.transaction_count || 0))
+    ].join("");
   } else {
     el.portfolioMetrics.hidden = false;
     const valueDelta = (portfolio.estimated_total_value || 0) - (portfolio.available_capital || 0);
@@ -1732,10 +1861,10 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
   const stocksPanel = el.stocksList?.closest(".panel");
   if (stocksPanel) {
-    stocksPanel.hidden = cash;
+    stocksPanel.hidden = cash || debt;
   }
 
-  if (!cash) {
+  if (!cash && !debt) {
     const columns = watchlist ? watchlistTableColumns() : holdingsTableColumns();
     if (!state.stocksSort.key || !columns.find((c) => c.key === state.stocksSort.key)) {
       state.stocksSort = watchlist
@@ -1823,11 +1952,18 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
       <strong>Auto-synced via ${escapeHtml(inst)}</strong>
       <span class="sub">Last sync: ${escapeHtml(lastSync)} — manual entry disabled.</span>
     </div>`;
-    el.recentTransactions.innerHTML = note + renderTransactionTable(recentTransactions);
+    // For cash and debt accounts the merchant + category in `notes` is the
+    // primary info per row, so show that column inline. Neither type has
+    // positions, so drop the Ticker/Shares columns entirely.
+    const showNotes = cash || debt;
+    const hideTickerShares = cash || debt;
+    el.recentTransactions.innerHTML = note + renderTransactionTable(recentTransactions, { showNotes, hideTickerShares });
   } else {
     el.openTransactionDialogBtn.hidden = false;
     el.viewAllTransactionsBtn.hidden = false;
-    el.recentTransactions.innerHTML = renderTransactionTable(recentTransactions);
+    const showNotes = cash || debt;
+    const hideTickerShares = cash || debt;
+    el.recentTransactions.innerHTML = renderTransactionTable(recentTransactions, { showNotes, hideTickerShares });
   }
 
   el.portfolioPeriodSelect.value = state.periods.portfolio;
@@ -1840,7 +1976,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   const allocationPanel = el.portfolioAllocationChart?.closest(".allocation-panel");
   const chartPanel = el.portfolioChart?.closest(".chart-panel");
   if (allocationPanel) {
-    allocationPanel.hidden = watchlist || cash;
+    allocationPanel.hidden = watchlist || cash || debt;
   }
   if (chartPanel) {
     chartPanel.hidden = watchlist;
@@ -1848,7 +1984,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
 
   if (!watchlist) {
     renderPortfolioChart();
-    if (!cash) {
+    if (!cash && !debt) {
       renderAllocationChart(stocks, portfolio);
     }
   }
@@ -2154,6 +2290,13 @@ async function refreshDashboardWithLivePrices() {
         return portfolio;
       }
 
+      // /api/live-prices returns the cash+positions sum (positive). DEBT
+      // accounts contribute negatively to the dashboard total, so flip the
+      // sign for estimated_total_value while leaving daily_values (the
+      // balance trajectory) positive.
+      const debt = isDebtPortfolio(portfolio);
+      const totalContribution = debt ? -liveEstimate : liveEstimate;
+
       const dailyValues = Array.isArray(portfolio?.daily_values) ? [...portfolio.daily_values] : [];
       const index = dailyValues.findIndex((point) => Math.floor(safeNumber(point?.date) / 86400) === todayBucket);
       const livePoint = {
@@ -2171,14 +2314,14 @@ async function refreshDashboardWithLivePrices() {
       const previousDayValue = previousDistinctDayValue(dailyValues, nowTs);
       let dayChangeAmount = safeNumber(portfolio?.day_change_amount);
       let dayChangePercent = safeNumber(portfolio?.day_change_percent);
-      if (Number.isFinite(previousDayValue) && previousDayValue > 0) {
+      if (!debt && Number.isFinite(previousDayValue) && previousDayValue > 0) {
         dayChangeAmount = liveEstimate - previousDayValue;
         dayChangePercent = (dayChangeAmount / previousDayValue) * 100;
       }
 
       return {
         ...portfolio,
-        estimated_total_value: liveEstimate,
+        estimated_total_value: totalContribution,
         day_change_amount: dayChangeAmount,
         day_change_percent: dayChangePercent,
         daily_values: dailyValues
@@ -2331,8 +2474,12 @@ async function openPortfolio(name) {
 
     localStorage.setItem(CURRENT_PORTFOLIO_KEY, name);
 
-    refreshPortfolioWithLivePrices(name);
-    startLiveRefreshTimer(name);
+    // Cash and debt accounts have no tradeable positions, so skip the live
+    // market-price refresh loop entirely — it would just be wasted requests.
+    if (!isCashPortfolio(portfolio) && !isDebtPortfolio(portfolio)) {
+      refreshPortfolioWithLivePrices(name);
+      startLiveRefreshTimer(name);
+    }
     return true;
   } catch (error) {
     showFlash(error.message);
@@ -2435,11 +2582,14 @@ function updateCreatePortfolioFormForType() {
   const type = el.createPortfolioType.value;
   const watchlist = type === "WATCHLIST";
   const cash = type === "CASH";
+  const debt = type === "DEBT";
   el.createPortfolioCapitalRow.hidden = watchlist;
   el.createPortfolioCapital.disabled = watchlist;
   const capitalLabel = el.createPortfolioCapitalRow.querySelector("label");
   if (capitalLabel) {
-    capitalLabel.textContent = cash ? "Starting Balance" : "Initial Capital";
+    capitalLabel.textContent = debt
+      ? "Current Debt Balance"
+      : cash ? "Starting Balance" : "Initial Capital";
   }
   el.createPortfolioCurrencyRow.hidden = !cash;
   if (!cash) {
@@ -2474,19 +2624,24 @@ function openTransactionDialog() {
   resetTransactionForm();
   const cash = isCashPortfolio(state.currentPortfolio);
   const crypto = isCryptoPortfolio(state.currentPortfolio);
+  const debt = isDebtPortfolio(state.currentPortfolio);
+  const balanceLike = cash || debt;
   const assetNoun = crypto ? "Crypto" : "Asset";
   Array.from(el.transactionType.options).forEach((opt) => {
     const assetOnly = opt.value === "buy" || opt.value === "sell" ||
                       opt.value === "dividend" ||
                       opt.value === "transfer_in_asset" || opt.value === "transfer_out_asset";
-    opt.hidden = cash && assetOnly;
-    opt.disabled = cash && assetOnly;
+    opt.hidden = balanceLike && assetOnly;
+    opt.disabled = balanceLike && assetOnly;
     if (opt.value === "buy") opt.textContent = crypto ? "Buy" : "Buy Stock";
     if (opt.value === "sell") opt.textContent = crypto ? "Sell" : "Sell Stock";
     if (opt.value === "transfer_in_asset") opt.textContent = `Transfer In ${assetNoun}`;
     if (opt.value === "transfer_out_asset") opt.textContent = `Transfer Out ${assetNoun}`;
-    if (opt.value === "dividend") opt.hidden = cash || crypto;
-    if (opt.value === "dividend") opt.disabled = cash || crypto;
+    if (opt.value === "dividend") opt.hidden = balanceLike || crypto;
+    if (opt.value === "dividend") opt.disabled = balanceLike || crypto;
+    if (opt.value === "deposit") opt.textContent = debt ? "New Charge" : "Deposit";
+    if (opt.value === "withdrawal") opt.textContent = debt ? "Payment" : "Withdrawal";
+    if (opt.value === "interest") opt.textContent = debt ? "Interest Charge" : "Interest";
   });
   const tickerLabel = el.groupTicker?.querySelector("label");
   if (tickerLabel) {
@@ -2495,7 +2650,7 @@ function openTransactionDialog() {
   if (el.transactionTicker) {
     el.transactionTicker.placeholder = crypto ? "BTC-USD" : "AAPL";
   }
-  if (cash) {
+  if (balanceLike) {
     el.transactionType.value = "deposit";
   } else if (crypto) {
     el.transactionType.value = "buy";
@@ -2598,7 +2753,9 @@ async function showAllTransactions() {
 
   try {
     const payload = await apiGet(`/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/transactions`);
-    el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [], { showNotes: true })}</div>`;
+    const hideTickerShares =
+      isDebtPortfolio(state.currentPortfolio) || isCashPortfolio(state.currentPortfolio);
+    el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderTransactionTable(payload.transactions || [], { showNotes: true, hideTickerShares })}</div>`;
     el.transactionsDialog.showModal();
   } catch (error) {
     showFlash(error.message);
@@ -2703,10 +2860,25 @@ async function confirmDeleteAccount() {
   }
 }
 
+async function refreshInTransit() {
+  try {
+    const data = await apiGet("/api/in-transit");
+    state.inTransit = {
+      total: Number(data?.total) || 0,
+      entries: Array.isArray(data?.entries) ? data.entries : []
+    };
+  } catch (_) {
+    state.inTransit = { total: 0, entries: [] };
+  }
+}
+
 async function loadDashboard() {
   hideFlash();
   try {
-    const payload = await apiGet("/api/portfolios");
+    const [payload] = await Promise.all([
+      apiGet("/api/portfolios"),
+      refreshInTransit()
+    ]);
     state.portfolios = normalizePortfolios(payload.portfolios);
     refreshAllTransactionsForDashboard();
     renderDashboard();

@@ -41,6 +41,8 @@ namespace Plaid
         time_t      date;             // unix midnight UTC of post date
         double      amount;           // Plaid sign convention: positive = money OUT, negative = money IN
         bool        pending;
+        std::string pfc_primary;      // personal_finance_category.primary, e.g. "TRANSFER_OUT", "FOOD_AND_DRINK"
+        std::string pfc_detailed;     // personal_finance_category.detailed, e.g. "FOOD_AND_DRINK_RESTAURANTS"
 
         Transaction() : date(0), amount(0.0), pending(false) {}
     };

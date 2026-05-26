@@ -14,7 +14,8 @@ enum class PortfolioType : uint8_t
     TRADITIONAL_IRA = 2,
     WATCHLIST = 3,
     CASH = 4,
-    CRYPTO = 5
+    CRYPTO = 5,
+    DEBT = 6
 };
 
 // Daily portfolio value record
@@ -57,15 +58,22 @@ struct Transaction
     std::string stock_symbol; // Stock ticker symbol (for BUY/SELL/DIVIDEND)
     double shares;            // Number of shares (for BUY/SELL transactions)
     std::string notes;        // Optional notes about transaction
+    std::string category;     // Spend category for credit/debit transactions
+                              // (Plaid personal_finance_category.detailed when available).
+                              // Empty for manual entries and pre-v4 records.
 
-    Transaction() 
+    Transaction()
         : date(0), amount(0.0), type(TransactionType::DEPOSIT), shares(0.0) {}
-    
-    Transaction(time_t d, double amt, TransactionType t, const std::string& n = "") 
+
+    Transaction(time_t d, double amt, TransactionType t, const std::string& n = "")
         : date(d), amount(amt), type(t), shares(0.0), notes(n) {}
-    
+
+    Transaction(time_t d, double amt, TransactionType t,
+                const std::string& n, const std::string& cat)
+        : date(d), amount(amt), type(t), shares(0.0), notes(n), category(cat) {}
+
     // Constructor for stock transactions
-    Transaction(time_t d, double amt, TransactionType t, 
+    Transaction(time_t d, double amt, TransactionType t,
                 const std::string& symbol, double num_shares, const std::string& n = "")
         : date(d), amount(amt), type(t), stock_symbol(symbol), shares(num_shares), notes(n) {}
 };
@@ -188,7 +196,9 @@ public:
     void setDailyValues(const std::vector<DailyPortfolioValue>& values);
     void clearDailyValues();
     void addTransaction(time_t date, double amount, TransactionType type, const std::string& notes = "");
-    void addTransaction(time_t date, double amount, TransactionType type, 
+    void addTransaction(time_t date, double amount, TransactionType type,
+                       const std::string& notes, const std::string& category);
+    void addTransaction(time_t date, double amount, TransactionType type,
                        const std::string& symbol, double shares, const std::string& notes = "");
 
     // File I/O

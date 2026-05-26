@@ -556,7 +556,8 @@ bool getTransactions(const Config& config,
              << "\"access_token\":" << jsonStr(access_token) << ","
              << "\"start_date\":" << jsonStr(start_date) << ","
              << "\"end_date\":" << jsonStr(end_date) << ","
-             << "\"options\":{\"count\":" << page_size << ",\"offset\":" << offset << "}"
+             << "\"options\":{\"count\":" << page_size << ",\"offset\":" << offset
+             << ",\"include_personal_finance_category\":true}"
              << "}";
 
         std::string response;
@@ -588,6 +589,18 @@ bool getTransactions(const Config& config,
             if (p_pos != std::string::npos)
             {
                 tx.pending = (el.compare(p_pos, 4, "true") == 0);
+            }
+            // personal_finance_category is a nested object; pull out primary + detailed.
+            size_t pfc_pos = findValueStart(el, "personal_finance_category");
+            if (pfc_pos != std::string::npos && pfc_pos < el.size() && el[pfc_pos] == '{')
+            {
+                size_t pfc_end = findMatchingBracket(el, pfc_pos);
+                if (pfc_end != std::string::npos)
+                {
+                    const std::string pfc_obj = el.substr(pfc_pos, pfc_end - pfc_pos + 1);
+                    extractString(pfc_obj, "primary", tx.pfc_primary);
+                    extractString(pfc_obj, "detailed", tx.pfc_detailed);
+                }
             }
             if (!tx.transaction_id.empty()) out_transactions.push_back(tx);
         }

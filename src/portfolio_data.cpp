@@ -16,7 +16,8 @@ namespace
     bool isStockTransactionType(TransactionType tx_type);
     StockEventType toStockEventType(TransactionType tx_type);
 
-    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 3;
+    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 4;
+    constexpr uint16_t MAX_CATEGORY_LENGTH = 128;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr uint32_t CURRENT_STOCK_FILE_VERSION = 1;
     constexpr uint32_t OLDEST_SUPPORTED_STOCK_FILE_VERSION = 1;
@@ -63,7 +64,7 @@ namespace
 
     bool isValidPortfolioType(uint8_t type_byte)
     {
-        return type_byte <= static_cast<uint8_t>(PortfolioType::CRYPTO);
+        return type_byte <= static_cast<uint8_t>(PortfolioType::DEBT);
     }
 
     bool isValidTransactionType(uint8_t type_byte)
@@ -539,7 +540,13 @@ void Portfolio::addTransaction(time_t date, double amount, TransactionType type,
     transactions.emplace_back(date, amount, type, notes);
 }
 
-void Portfolio::addTransaction(time_t date, double amount, TransactionType type, 
+void Portfolio::addTransaction(time_t date, double amount, TransactionType type,
+                               const std::string& notes, const std::string& category)
+{
+    transactions.emplace_back(date, amount, type, notes, category);
+}
+
+void Portfolio::addTransaction(time_t date, double amount, TransactionType type,
                                const std::string& symbol, double shares, const std::string& notes)
 {
     transactions.emplace_back(date, amount, type, symbol, shares, notes);
@@ -611,10 +618,11 @@ double Portfolio::getCapitalMovement(time_t start_date, time_t end_date) const
  *   - v2+ array: [date (time_t, 8 bytes) + value (double, 8 bytes) + last_updated (time_t, 8 bytes)] * count
  * Transactions:
  *   - count: uint32_t (4 bytes)
- *   - array: [date (time_t, 8 bytes) + amount (double, 8 bytes) + 
- *            type (uint8_t, 1 byte) + symbol_length (uint16_t, 2 bytes) + 
+ *   - array: [date (time_t, 8 bytes) + amount (double, 8 bytes) +
+ *            type (uint8_t, 1 byte) + symbol_length (uint16_t, 2 bytes) +
  *            symbol (variable) + shares (double, 8 bytes) +
- *            notes_length (uint16_t, 2 bytes) + notes (variable)]
+ *            notes_length (uint16_t, 2 bytes) + notes (variable) +
+ *            (v4+) category_length (uint16_t, 2 bytes) + category (variable)]
  */
 
 bool Portfolio::saveToFile(const std::string& filepath) const
@@ -686,7 +694,11 @@ bool Portfolio::saveToFile(const std::string& filepath) const
         if (tx.stock_symbol.length() > std::numeric_limits<uint16_t>::max() ||
             tx.stock_symbol.length() > MAX_SYMBOL_LENGTH)
         {
-            std::cerr << "Error: Stock symbol too long for serialization" << std::endl;
+            std::cerr << "Error: Stock symbol too long for serialization: '"
+                      << tx.stock_symbol.substr(0, std::min<size_t>(tx.stock_symbol.length(), 64))
+                      << "' (len=" << tx.stock_symbol.length() << ", date="
+                      << static_cast<long long>(tx.date) << ", type="
+                      << static_cast<int>(tx.type) << ")" << std::endl;
             return false;
         }
         uint16_t symbol_length = static_cast<uint16_t>(tx.stock_symbol.length());
@@ -711,6 +723,19 @@ bool Portfolio::saveToFile(const std::string& filepath) const
         if (notes_length > 0)
         {
             file.write(tx.notes.c_str(), notes_length);
+        }
+
+        // v4+: category (spend category from Plaid PFC, etc.)
+        std::string cat = tx.category;
+        if (cat.length() > MAX_CATEGORY_LENGTH)
+        {
+            cat.resize(MAX_CATEGORY_LENGTH);
+        }
+        uint16_t category_length = static_cast<uint16_t>(cat.length());
+        file.write(reinterpret_cast<const char*>(&category_length), sizeof(uint16_t));
+        if (category_length > 0)
+        {
+            file.write(cat.c_str(), category_length);
         }
     }
 
@@ -928,9 +953,37 @@ bool Portfolio::loadFromFile(const std::string& filepath)
                 return false;
             }
         }
-        
+
+        // v4+: optional spend category. Older files omit this entirely.
+        std::string category;
+        if (loaded_version >= 4)
+        {
+            uint16_t category_length = 0;
+            if (!readExact(file, reinterpret_cast<char*>(&category_length), sizeof(uint16_t)))
+            {
+                std::cerr << "Error: Corrupt or truncated file (category length)" << std::endl;
+                return false;
+            }
+            if (category_length > MAX_CATEGORY_LENGTH)
+            {
+                std::cerr << "Error: Category length exceeds supported limit" << std::endl;
+                return false;
+            }
+            if (category_length > 0)
+            {
+                category.resize(category_length);
+                if (!readExact(file, &category[0], category_length))
+                {
+                    std::cerr << "Error: Corrupt or truncated file (category)" << std::endl;
+                    return false;
+                }
+            }
+        }
+
         TransactionType tx_type = static_cast<TransactionType>(type_byte);
-        loaded_transactions.emplace_back(date, amount, tx_type, symbol, shares, notes);
+        Transaction loaded(date, amount, tx_type, symbol, shares, notes);
+        loaded.category = category;
+        loaded_transactions.push_back(loaded);
     }
 
     version = loaded_version;
@@ -1470,9 +1523,10 @@ bool PortfolioManager::savePortfolio(const std::string& name, const Portfolio& p
     const std::string stocks_dir = getStocksDirectoryPath(name);
 
     // WATCHLIST manages stock files outside transaction-derived reconciliation;
-    // CASH portfolios hold no stocks at all. In both cases skip the stocks dir.
+    // CASH and DEBT portfolios hold no stocks at all. Skip the stocks dir.
     if (portfolio.getType() == PortfolioType::WATCHLIST ||
-        portfolio.getType() == PortfolioType::CASH)
+        portfolio.getType() == PortfolioType::CASH ||
+        portfolio.getType() == PortfolioType::DEBT)
     {
         return portfolio.saveToFile(filepath);
     }

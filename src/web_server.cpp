@@ -34,12 +34,16 @@
 
 namespace
 {
-    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 3;
+    // Keep in sync with portfolio_data.cpp; bump when the Portfolio file
+    // format changes so hasSupportedPortfolioHeader() accepts new versions.
+    constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 4;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
     constexpr int DAILY_SYNC_HOUR_LOCAL = 18;
     constexpr int DAILY_SYNC_MINUTE_LOCAL = 5;
     constexpr int DAILY_SYNC_RETRY_MINUTES = 15;
     constexpr int DAILY_SYNC_POLL_SECONDS = 60;
+    constexpr int PLAID_SYNC_INTERVAL_SECONDS = 3600;   // pull connected accounts once per hour
+    constexpr int PLAID_SYNC_POLL_SECONDS = 60;         // wall-clock poll interval
     constexpr long long SECONDS_PER_DAY = 86400;
     std::mutex g_data_access_mutex;
 
@@ -694,6 +698,10 @@ namespace
         if (normalized == "CRYPTO")
         {
             return PortfolioType::CRYPTO;
+        }
+        if (normalized == "DEBT")
+        {
+            return PortfolioType::DEBT;
         }
 
         return std::nullopt;
@@ -1363,6 +1371,7 @@ namespace
             case PortfolioType::WATCHLIST: return "WATCHLIST";
             case PortfolioType::CASH: return "CASH";
             case PortfolioType::CRYPTO: return "CRYPTO";
+            case PortfolioType::DEBT: return "DEBT";
         }
 
         return "UNKNOWN";
@@ -1557,6 +1566,7 @@ namespace
         return out.str();
     }
 
+
     std::string serializeTransactions(std::vector<Transaction> txs, int limit)
     {
         // Compute realized profit per SELL_STOCK by walking transactions in chronological order
@@ -1675,7 +1685,8 @@ namespace
                 << "\"type\":" << jsonString(transactionTypeToString(tx.type)) << ","
                 << "\"stock_symbol\":" << jsonString(tx.stock_symbol) << ","
                 << "\"shares\":" << jsonNumber(tx.shares) << ","
-                << "\"notes\":" << jsonString(tx.notes);
+                << "\"notes\":" << jsonString(tx.notes) << ","
+                << "\"category\":" << jsonString(tx.category);
             auto profit_it = profit_by_index.find(idx);
             if (profit_it != profit_by_index.end())
             {
@@ -1710,7 +1721,7 @@ namespace
             return false;
         }
 
-        return type <= static_cast<uint8_t>(PortfolioType::CRYPTO);
+        return type <= static_cast<uint8_t>(PortfolioType::DEBT);
     }
 
     double estimatePortfolioTotalValue(const Portfolio& portfolio, PortfolioManager& manager, const std::string& portfolio_name)
@@ -1718,6 +1729,13 @@ namespace
         if (portfolio.getType() == PortfolioType::WATCHLIST)
         {
             return 0.0;
+        }
+
+        // DEBT accounts store outstanding balance as a positive available_capital
+        // but contribute negatively to overall totals.
+        if (portfolio.getType() == PortfolioType::DEBT)
+        {
+            return -portfolio.getAvailableCapital();
         }
 
         // For foreign-currency cash accounts, convert the balance into USD so the
@@ -1821,7 +1839,8 @@ namespace
             return day_change_amount;
         }
 
-        if (portfolio.getType() == PortfolioType::CASH)
+        if (portfolio.getType() == PortfolioType::CASH ||
+            portfolio.getType() == PortfolioType::DEBT)
         {
             return 0.0;
         }
@@ -1875,7 +1894,8 @@ namespace
             return (day_change_amount / std::abs(previous_close_total)) * 100.0;
         }
 
-        if (portfolio.getType() == PortfolioType::CASH)
+        if (portfolio.getType() == PortfolioType::CASH ||
+            portfolio.getType() == PortfolioType::DEBT)
         {
             return 0.0;
         }
@@ -2725,6 +2745,136 @@ namespace
         return std::string(buf);
     }
 
+    // ---- In-transit transfer matching ------------------------------------
+    //
+    // Transfers between the user's own connected accounts produce a transient
+    // gap: Plaid reflects the outflow at the source instantly but the matching
+    // inflow at the destination can lag by hours or days. We tag transfer-typed
+    // Plaid transactions with "[TXFR] " in notes (see syncCashAccount), then at
+    // read time pair them up across accounts. Unmatched recent outflows are the
+    // money still in flight — added back to the dashboard's Total Assets so the
+    // user doesn't see a temporary dip.
+    constexpr int TXFR_LOOKBACK_DAYS = 14;       // window we scan for pairs
+    constexpr int TXFR_TRANSIT_WINDOW_DAYS = 5;  // outflows older than this and
+                                                  // still unmatched are treated
+                                                  // as money truly gone (paid out),
+                                                  // not in transit.
+    constexpr double TXFR_AMOUNT_TOLERANCE = 1.0; // $1 tolerance on match
+
+    struct InTransitEntry
+    {
+        std::string portfolio_name;
+        time_t      date;
+        double      amount;   // absolute value of the unmatched outflow
+        std::string notes;    // display name, [TXFR] prefix stripped
+    };
+
+    struct InTransitSummary
+    {
+        double total;
+        std::vector<InTransitEntry> entries;
+
+        InTransitSummary() : total(0.0) {}
+    };
+
+    bool notesStartsWithTxfr(const std::string& notes)
+    {
+        return notes.compare(0, 7, "[TXFR] ") == 0;
+    }
+
+    InTransitSummary computeInTransit(PortfolioManager& manager)
+    {
+        const time_t now = std::time(nullptr);
+        const time_t lookback_floor = now - (TXFR_LOOKBACK_DAYS * 86400);
+        const time_t transit_floor = now - (TXFR_TRANSIT_WINDOW_DAYS * 86400);
+
+        manager.scanPortfolios();
+
+        struct TxfrEvent
+        {
+            std::string portfolio_name;
+            time_t date;
+            double amount;       // our sign: positive = inflow, negative = outflow
+            std::string notes;
+            bool matched;
+        };
+
+        std::vector<TxfrEvent> outflows;
+        std::vector<TxfrEvent> inflows;
+
+        for (const std::string& name : manager.getPortfolioNames())
+        {
+            if (!manager.hasConnection(name)) continue;
+            Portfolio p;
+            if (!manager.loadPortfolio(name, p)) continue;
+            for (const auto& t : p.getTransactions())
+            {
+                if (t.date < lookback_floor) continue;
+                if (!notesStartsWithTxfr(t.notes)) continue;
+                if (t.amount < 0.0)
+                {
+                    outflows.push_back({name, t.date, t.amount, t.notes, false});
+                }
+                else if (t.amount > 0.0)
+                {
+                    inflows.push_back({name, t.date, t.amount, t.notes, false});
+                }
+            }
+        }
+
+        InTransitSummary result;
+        for (auto& out : outflows)
+        {
+            const double out_abs = -out.amount;
+            bool matched = false;
+            for (auto& in : inflows)
+            {
+                if (in.matched) continue;
+                if (in.portfolio_name == out.portfolio_name) continue;
+                if (std::fabs(in.amount - out_abs) > TXFR_AMOUNT_TOLERANCE) continue;
+                if (in.date < out.date) continue;
+                if (in.date > out.date + (TXFR_TRANSIT_WINDOW_DAYS * 86400)) continue;
+                in.matched = true;
+                matched = true;
+                break;
+            }
+            if (matched) continue;
+            if (out.date < transit_floor) continue;  // too old, treat as out, not transit
+
+            InTransitEntry entry;
+            entry.portfolio_name = out.portfolio_name;
+            entry.date = out.date;
+            entry.amount = out_abs;
+            entry.notes = out.notes.size() > 7 ? out.notes.substr(7) : std::string();
+            result.entries.push_back(entry);
+            result.total += out_abs;
+        }
+        return result;
+    }
+
+    std::string buildInTransitJson(PortfolioManager& manager)
+    {
+        const InTransitSummary summary = computeInTransit(manager);
+        std::ostringstream out;
+        out << "{"
+            << "\"total\":" << jsonNumber(summary.total) << ","
+            << "\"entries\":[";
+        bool first = true;
+        for (const auto& e : summary.entries)
+        {
+            if (!first) out << ",";
+            first = false;
+            out << "{"
+                << "\"portfolio\":" << jsonString(e.portfolio_name) << ","
+                << "\"date\":" << static_cast<long long>(e.date) << ","
+                << "\"amount\":" << jsonNumber(e.amount) << ","
+                << "\"notes\":" << jsonString(e.notes)
+                << "}";
+        }
+        out << "]}";
+        return out.str();
+    }
+
     // Plaid /transactions/get sign: positive = money OUT. Our sign: positive = cash IN.
     // So for the cash path, our_amount = -plaid.amount.
     HttpResponse syncCashAccount(PortfolioManager& manager,
@@ -2777,7 +2927,19 @@ namespace
                 ? TransactionType::DEPOSIT
                 : TransactionType::WITHDRAWAL;
             const std::string display_name = !tx.merchant_name.empty() ? tx.merchant_name : tx.name;
-            rebuilt.addTransaction(tx.date, our_amount, type, display_name);
+            // Tag Plaid-categorized transfers so cross-account matching can later
+            // identify money in transit between the user's own connected accounts.
+            const bool is_transfer =
+                tx.pfc_primary == "TRANSFER_IN" || tx.pfc_primary == "TRANSFER_OUT";
+            const std::string notes = is_transfer
+                ? std::string("[TXFR] ") + display_name
+                : display_name;
+            // Persist the spend category for later analysis (credit cards in particular).
+            // Prefer Plaid's detailed PFC ("FOOD_AND_DRINK_RESTAURANTS"); fall back to primary.
+            const std::string category = !tx.pfc_detailed.empty()
+                ? tx.pfc_detailed
+                : tx.pfc_primary;
+            rebuilt.addTransaction(tx.date, our_amount, type, notes, category);
             tx_sum += our_amount;
         }
         rebuilt.setAvailableCapital(have_anchor ? anchor_balance : tx_sum);
@@ -3298,6 +3460,11 @@ namespace
             return makeJsonResponse(200, buildPortfolioSummaryJson(manager));
         }
 
+        if (request.method == "GET" && request.path == "/api/in-transit")
+        {
+            return makeJsonResponse(200, buildInTransitJson(manager));
+        }
+
         if (request.method == "GET" && request.path == "/api/live-prices")
         {
             if (!manager.scanPortfolios())
@@ -3444,7 +3611,7 @@ namespace
             auto parsed_type = parsePortfolioType(raw_type.value());
             if (!parsed_type.has_value())
             {
-                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, TRADITIONAL_IRA, WATCHLIST, CASH, or CRYPTO"));
+                return makeJsonResponse(400, makeErrorBody("type must be BROKERAGE, ROTH_IRA, TRADITIONAL_IRA, WATCHLIST, CASH, CRYPTO, or DEBT"));
             }
 
             double initial_capital = getObjectNumber(body, "initial_capital").value_or(0.0);
@@ -4242,6 +4409,64 @@ bool PortfolioApiServer::start()
                 }
 
                 std::this_thread::sleep_for(std::chrono::seconds(DAILY_SYNC_POLL_SECONDS));
+            }
+        }
+    ).detach();
+
+    // Hourly Plaid auto-pull: refresh every connected portfolio once per hour.
+    // Plaid bills Transactions and Investments per Item per month (subscription),
+    // so call frequency is bounded by per-Item rate limits (~30 calls/Item/day)
+    // rather than cost. Hourly leaves headroom for retries and manual syncs.
+    const std::string plaid_sync_data_dir = data_directory;
+    std::thread(
+        [plaid_sync_data_dir]()
+        {
+            time_t last_plaid_run = 0;
+            while (true)
+            {
+                const time_t now = std::time(nullptr);
+                if (now - last_plaid_run >= PLAID_SYNC_INTERVAL_SECONDS)
+                {
+                    PortfolioManager sync_manager(plaid_sync_data_dir);
+                    if (sync_manager.scanPortfolios())
+                    {
+                        const auto& names = sync_manager.getPortfolioNames();
+                        int succeeded = 0;
+                        int failed = 0;
+                        int skipped = 0;
+                        for (const std::string& name : names)
+                        {
+                            if (!sync_manager.hasConnection(name))
+                            {
+                                ++skipped;
+                                continue;
+                            }
+                            std::lock_guard<std::mutex> lock(g_data_access_mutex);
+                            HttpResponse resp = syncPortfolioFromConnection(sync_manager, name);
+                            if (resp.status >= 200 && resp.status < 300)
+                            {
+                                ++succeeded;
+                            }
+                            else
+                            {
+                                ++failed;
+                                std::cerr << "[plaid] hourly sync failed for "
+                                          << name << ": status=" << resp.status
+                                          << " body=" << resp.body << std::endl;
+                            }
+                        }
+                        std::cerr << "[plaid] hourly sync: " << succeeded
+                                  << " ok, " << failed << " failed, "
+                                  << skipped << " not connected" << std::endl;
+                    }
+                    else
+                    {
+                        std::cerr << "[plaid] hourly sync: failed to scan portfolios" << std::endl;
+                    }
+                    last_plaid_run = now;
+                }
+
+                std::this_thread::sleep_for(std::chrono::seconds(PLAID_SYNC_POLL_SECONDS));
             }
         }
     ).detach();

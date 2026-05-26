@@ -544,10 +544,11 @@ namespace MarketDataSync
             }
         }
 
-        // CASH portfolios have no stocks; rebuild the balance series from
-        // transactions alone, and always anchor a point at "today" so a freshly
-        // created account shows up on the chart.
-        if (portfolio.getType() == PortfolioType::CASH)
+        // CASH and DEBT portfolios have no stocks; rebuild the balance series
+        // from transactions alone, and always anchor a point at "today" so a
+        // freshly created account shows up on the chart.
+        if (portfolio.getType() == PortfolioType::CASH ||
+            portfolio.getType() == PortfolioType::DEBT)
         {
             const long long today = dayBucket(std::time(nullptr));
             timeline_days.insert(today);
@@ -713,9 +714,10 @@ namespace MarketDataSync
             return false;
         }
 
-        // CASH portfolios hold no tickers — skip the Yahoo Finance fetch path
-        // and just rebuild the balance series from transactions.
-        if (portfolio.getType() == PortfolioType::CASH)
+        // CASH and DEBT portfolios hold no tickers — skip the Yahoo Finance
+        // fetch path and just rebuild the balance series from transactions.
+        if (portfolio.getType() == PortfolioType::CASH ||
+            portfolio.getType() == PortfolioType::DEBT)
         {
             return recomputePortfolioDailyValues(manager, portfolio_name);
         }
