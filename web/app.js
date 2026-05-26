@@ -2,6 +2,19 @@ const API_STORAGE_KEY = "portfolio-api-base";
 const CURRENT_PORTFOLIO_KEY = "portfolio-current";
 const PINNED_ACCOUNTS_KEY = "portfolio-pinned-accounts";
 const ACCOUNT_FILTER_KEY = "portfolio-account-filter";
+const CHART_PERIOD_KEY_PREFIX = "portfolio-chart-period:";
+const VALID_CHART_PERIODS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
+const DEFAULT_CHART_PERIOD = "6M";
+
+function getChartPeriod(name) {
+  const stored = localStorage.getItem(CHART_PERIOD_KEY_PREFIX + name);
+  return VALID_CHART_PERIODS.includes(stored) ? stored : DEFAULT_CHART_PERIOD;
+}
+
+function setChartPeriod(name, value) {
+  if (!VALID_CHART_PERIODS.includes(value)) return;
+  localStorage.setItem(CHART_PERIOD_KEY_PREFIX + name, value);
+}
 
 const TYPE_SORT_ORDER = ["BROKERAGE", "ROTH_IRA", "TRADITIONAL_IRA", "CRYPTO", "CASH", "WATCHLIST"];
 
@@ -239,8 +252,8 @@ const state = {
   portfolioLiveRefreshInFlight: false,
   dashboardLiveRefreshInFlight: false,
   periods: {
-    dashboard: "6M",
-    portfolio: "6M"
+    dashboard: getChartPeriod("dashboard"),
+    portfolio: getChartPeriod("portfolio")
   },
   charts: {
     dashboard: null,
@@ -1515,6 +1528,7 @@ function renderDashboard() {
 
   dashboardPeriodSelect.addEventListener("change", (event) => {
     state.periods.dashboard = event.target.value;
+    setChartPeriod("dashboard", state.periods.dashboard);
     drawDashboardChart();
   });
 
@@ -1819,6 +1833,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
   el.portfolioPeriodSelect.value = state.periods.portfolio;
   el.portfolioPeriodSelect.onchange = (event) => {
     state.periods.portfolio = event.target.value;
+    setChartPeriod("portfolio", state.periods.portfolio);
     renderPortfolioChart();
   };
 
