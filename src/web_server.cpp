@@ -2875,6 +2875,128 @@ namespace
         return out.str();
     }
 
+    // Parse "YYYY-MM-DD" into a UTC unix timestamp at noon. Returns 0 on failure.
+    time_t parseIsoDateUTC(const std::string& s)
+    {
+        if (s.size() < 10) return 0;
+        int y = 0, m = 0, d = 0;
+        if (std::sscanf(s.c_str(), "%4d-%2d-%2d", &y, &m, &d) != 3) return 0;
+        std::tm tm{};
+        tm.tm_year = y - 1900;
+        tm.tm_mon = m - 1;
+        tm.tm_mday = d;
+        tm.tm_hour = 12;
+        return timegm(&tm);
+    }
+
+    struct SpendOverride
+    {
+        std::string match_lower; // case-insensitive substring on tx notes
+        std::string category;    // PFC string to substitute (detailed or primary_*)
+    };
+
+    // Load merchant-name → category overrides from data/spend_overrides.json.
+    // Plaid's auto-classification is wrong for some recurring merchants — this
+    // lets the user pin them to the right primary without editing tx history.
+    // Returns an empty vector silently if the file is missing or malformed.
+    std::vector<SpendOverride> loadSpendOverrides()
+    {
+        std::vector<SpendOverride> rules;
+        std::ifstream f("data/spend_overrides.json");
+        if (!f.is_open()) return rules;
+        std::stringstream buffer;
+        buffer << f.rdbuf();
+        const std::string content = buffer.str();
+        JsonParser parser(content);
+        auto root = parser.parseRoot();
+        if (!root.has_value() || root->type != JsonType::OBJECT) return rules;
+        auto it = root->object_value.find("rules");
+        if (it == root->object_value.end() || it->second.type != JsonType::ARRAY) return rules;
+        for (const auto& el : it->second.array_value)
+        {
+            if (el.type != JsonType::OBJECT) continue;
+            auto m_it = el.object_value.find("match");
+            auto c_it = el.object_value.find("category");
+            if (m_it == el.object_value.end() || c_it == el.object_value.end()) continue;
+            if (m_it->second.type != JsonType::STRING || c_it->second.type != JsonType::STRING) continue;
+            SpendOverride rule;
+            rule.match_lower = lowerCopy(m_it->second.string_value);
+            rule.category = c_it->second.string_value;
+            if (!rule.match_lower.empty() && !rule.category.empty()) rules.push_back(rule);
+        }
+        return rules;
+    }
+
+    // Withdrawals on CASH/DEBT accounts, normalized to positive "spend" amounts.
+    // Excludes inter-account transfers (notes prefixed "[TXFR]" by syncCashAccount)
+    // and Plaid TRANSFER_*/LOAN_PAYMENTS categories — paying down a credit card is
+    // not spend, it just shifts the liability.
+    std::string buildSpendJson(PortfolioManager& manager, time_t from, time_t to)
+    {
+        const std::vector<SpendOverride> overrides = loadSpendOverrides();
+        std::ostringstream out;
+        out << "{"
+            << "\"from\":" << static_cast<long long>(from) << ","
+            << "\"to\":" << static_cast<long long>(to) << ","
+            << "\"transactions\":[";
+        bool first = true;
+
+        if (manager.scanPortfolios())
+        {
+            const std::vector<std::string> names = manager.getPortfolioNames();
+            for (const std::string& name : names)
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(name, portfolio)) continue;
+                const PortfolioType pt = portfolio.getType();
+                if (pt != PortfolioType::CASH && pt != PortfolioType::DEBT) continue;
+
+                for (const Transaction& tx : portfolio.getTransactions())
+                {
+                    if (tx.type != TransactionType::WITHDRAWAL) continue;
+                    if (tx.date < from || tx.date > to) continue;
+
+                    // Strip inter-account transfers tagged by the sync path.
+                    if (tx.notes.size() >= 6 && tx.notes.compare(0, 6, "[TXFR]") == 0) continue;
+
+                    const std::string upper_cat = upperCopy(tx.category);
+                    if (upper_cat.rfind("TRANSFER_IN", 0) == 0) continue;
+                    if (upper_cat.rfind("TRANSFER_OUT", 0) == 0) continue;
+                    if (upper_cat.rfind("LOAN_PAYMENTS", 0) == 0) continue;
+
+                    if (!first) out << ",";
+                    first = false;
+
+                    std::string effective_category = tx.category;
+                    if (!overrides.empty())
+                    {
+                        const std::string notes_lower = lowerCopy(tx.notes);
+                        for (const auto& rule : overrides)
+                        {
+                            if (notes_lower.find(rule.match_lower) != std::string::npos)
+                            {
+                                effective_category = rule.category;
+                                break;
+                            }
+                        }
+                    }
+
+                    out << "{"
+                        << "\"date\":" << static_cast<long long>(tx.date) << ","
+                        << "\"amount\":" << jsonNumber(std::abs(tx.amount)) << ","
+                        << "\"category\":" << jsonString(effective_category) << ","
+                        << "\"notes\":" << jsonString(tx.notes) << ","
+                        << "\"account\":" << jsonString(name) << ","
+                        << "\"account_type\":" << jsonString(portfolioTypeToString(pt))
+                        << "}";
+                }
+            }
+        }
+
+        out << "]}";
+        return out.str();
+    }
+
     // Plaid /transactions/get sign: positive = money OUT. Our sign: positive = cash IN.
     // So for the cash path, our_amount = -plaid.amount.
     HttpResponse syncCashAccount(PortfolioManager& manager,
@@ -3463,6 +3585,46 @@ namespace
         if (request.method == "GET" && request.path == "/api/in-transit")
         {
             return makeJsonResponse(200, buildInTransitJson(manager));
+        }
+
+        if (request.method == "GET" && request.path == "/api/spend")
+        {
+            const auto query_values = parseQuery(request.query);
+            const time_t now = std::time(nullptr);
+
+            time_t from = 0;
+            auto from_it = query_values.find("from");
+            if (from_it != query_values.end() && !from_it->second.empty())
+            {
+                from = parseIsoDateUTC(from_it->second);
+                if (from == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
+                }
+            }
+            else
+            {
+                from = now - (365LL * 86400);
+            }
+
+            time_t to = 0;
+            auto to_it = query_values.find("to");
+            if (to_it != query_values.end() && !to_it->second.empty())
+            {
+                to = parseIsoDateUTC(to_it->second);
+                if (to == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
+                }
+                // Bump to end-of-day so the chosen day is inclusive.
+                to += 86399;
+            }
+            else
+            {
+                to = now;
+            }
+
+            return makeJsonResponse(200, buildSpendJson(manager, from, to));
         }
 
         if (request.method == "GET" && request.path == "/api/live-prices")

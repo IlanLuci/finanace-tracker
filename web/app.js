@@ -258,7 +258,15 @@ const state = {
   charts: {
     dashboard: null,
     portfolio: null,
-    allocation: null
+    allocation: null,
+    spendBar: null,
+    spendPie: null
+  },
+  spend: {
+    transactions: [],
+    bucket: localStorage.getItem("ft.spend.bucket") || "monthly",
+    range: localStorage.getItem("ft.spend.range") || "3M",
+    loading: false
   },
   stocksSort: { key: null, dir: null },
   allTransactions: {},
@@ -271,6 +279,7 @@ const el = {
   flash: document.getElementById("flash"),
   dashboardView: document.getElementById("dashboardView"),
   portfolioView: document.getElementById("portfolioView"),
+  spendView: document.getElementById("spendView"),
   portfolioName: document.getElementById("portfolioName"),
   portfolioType: document.getElementById("portfolioType"),
   portfolioMetrics: document.getElementById("portfolioMetrics"),
@@ -589,14 +598,17 @@ function applyDashboardLastUpdatedChip() {
 }
 
 function setActiveView(view) {
-  const showDashboardView = view === "dashboard";
-  state.activeView = showDashboardView ? "dashboard" : "portfolio";
+  const validViews = ["dashboard", "portfolio", "spend"];
+  const active = validViews.includes(view) ? view : "dashboard";
+  state.activeView = active;
 
-  el.dashboardView.classList.toggle("is-active", showDashboardView);
-  el.portfolioView.classList.toggle("is-active", !showDashboardView);
+  el.dashboardView.classList.toggle("is-active", active === "dashboard");
+  el.portfolioView.classList.toggle("is-active", active === "portfolio");
+  if (el.spendView) el.spendView.classList.toggle("is-active", active === "spend");
 
-  el.dashboardView.hidden = !showDashboardView;
-  el.portfolioView.hidden = showDashboardView;
+  el.dashboardView.hidden = active !== "dashboard";
+  el.portfolioView.hidden = active !== "portfolio";
+  if (el.spendView) el.spendView.hidden = active !== "spend";
 }
 
 function apiUrl(path) {
@@ -1221,13 +1233,15 @@ const themeTooltipStyle = {
   backgroundColor: "#f5f5f5",
   titleColor: "#222",
   bodyColor: "#222",
+  footerColor: "#222",
   borderColor: "#222",
   borderWidth: 1,
   cornerRadius: 0,
   displayColors: false,
   padding: 10,
   titleFont: { family: '"Noto Serif", Georgia, serif', weight: "500", size: 12 },
-  bodyFont: { family: '"Noto Serif", Georgia, serif', weight: "400", size: 12 }
+  bodyFont: { family: '"Noto Serif", Georgia, serif', weight: "400", size: 12 },
+  footerFont: { family: '"Noto Serif", Georgia, serif', weight: "600", size: 12 }
 };
 
 function createLineChart(canvas, points, label, color) {
@@ -1441,9 +1455,6 @@ function renderDashboard() {
     const fx = (p.currency && p.currency !== "USD") ? (p.fx_to_usd || 1) : 1;
     return sum + (p.available_capital || 0) * fx;
   }, 0);
-  const totalDebt = accountPortfolios.reduce((sum, p) => {
-    return sum + (isDebtPortfolio(p) ? (p.available_capital || 0) : 0);
-  }, 0);
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
   const aggregateTrend = mergeDailySeries(accountPortfolios);
   // Day Change tracks the chart: live total vs. the most recent prior-day
@@ -1461,17 +1472,13 @@ function renderDashboard() {
   const accountCountSub = `${accountPortfolios.length} account${accountPortfolios.length === 1 ? "" : "s"}`;
   const totalAssetsSub = inTransitTotal > 0
     ? `Incl. ${currency(inTransitTotal)} in transit between accounts`
-    : (totalDebt > 0 ? `Net of ${currency(totalDebt)} debt` : accountCountSub);
-  const debtCard = totalDebt > 0
-    ? metricCard("Total Debt", currency(totalDebt), "Subtracted from Total Assets")
-    : "";
+    : accountCountSub;
 
   const dashboardMetrics = `<section class="metric-grid">
     ${metricCard("Total Assets", currency(totalAssets), totalAssetsSub)}
     ${metricCard("Day Change", signedCurrency(totalDayChange), `${percentage(totalDayChangePercent)} vs previous close`)}
     ${metricCard("Total Available Cash", currency(totalCash), "Across accounts")}
     ${metricCard("Total Positions", String(totalStocks), "Stocks and crypto across accounts")}
-    ${debtCard}
   </section>`;
 
   const currentFilter = getAccountFilter();
@@ -1570,6 +1577,7 @@ function renderDashboard() {
         <h3>Accounts</h3>
         <div class="chart-tools">
           ${filterMarkup}
+          <button id="openSpendAnalysisBtn" class="ghost-btn" type="button">Spend Analysis</button>
           <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Account</button>
         </div>
       </div>
@@ -1586,6 +1594,11 @@ function renderDashboard() {
   const openPortfolioCreateDialogBtn = document.getElementById("openPortfolioCreateDialogBtn");
   if (openPortfolioCreateDialogBtn) {
     openPortfolioCreateDialogBtn.addEventListener("click", openCreatePortfolioDialog);
+  }
+
+  const openSpendAnalysisBtn = document.getElementById("openSpendAnalysisBtn");
+  if (openSpendAnalysisBtn) {
+    openSpendAnalysisBtn.addEventListener("click", showSpendAnalysis);
   }
 
   const accountFilterSelect = document.getElementById("accountFilterSelect");
@@ -2503,6 +2516,264 @@ function showDashboard() {
   localStorage.removeItem(CURRENT_PORTFOLIO_KEY);
 }
 
+// ---- Spend Analysis -----------------------------------------------------
+
+// Stable color per primary PFC so the same category looks the same across the
+// stacked-bar and pie charts. Tweak palette if Plaid adds new primaries.
+const SPEND_CATEGORY_COLORS = {
+  FOOD_AND_DRINK:       "#d97706",
+  GENERAL_MERCHANDISE:  "#7c3aed",
+  TRANSPORTATION:       "#0891b2",
+  TRAVEL:               "#2563eb",
+  ENTERTAINMENT:        "#db2777",
+  RENT_AND_UTILITIES:   "#475569",
+  MEDICAL:              "#dc2626",
+  PERSONAL_CARE:        "#ec4899",
+  GENERAL_SERVICES:     "#65a30d",
+  HOME_IMPROVEMENT:     "#92400e",
+  GOVERNMENT_AND_NON_PROFIT: "#0d9488",
+  BANK_FEES:            "#a16207",
+  INCOME:               "#16a34a",
+  OTHER:                "#6b7280"
+};
+
+function spendCategoryColor(primary) {
+  return SPEND_CATEGORY_COLORS[primary] || SPEND_CATEGORY_COLORS.OTHER;
+}
+
+function spendCategoryLabel(primary) {
+  return PFC_PRIMARY_LABELS[primary] || prettifyCategory(primary) || "Uncategorized";
+}
+
+function rangeToDates(range) {
+  const now = new Date();
+  // Snap "from" to the first of a calendar month so each N-month range shows
+  // exactly N month buckets (current month + N-1 prior months), not partial slices.
+  const firstOfMonth = (offset) => new Date(now.getFullYear(), now.getMonth() - offset, 1);
+  let from;
+  switch (range) {
+    case "1M": from = firstOfMonth(0); break;
+    case "3M": from = firstOfMonth(2); break;
+    case "6M": from = firstOfMonth(5); break;
+    case "1Y": from = firstOfMonth(11); break;
+    case "YTD": from = new Date(now.getFullYear(), 0, 1); break;
+    case "ALL": from = new Date(2000, 0, 1); break;
+    default: from = firstOfMonth(2);
+  }
+  const isoDate = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return { from: isoDate(from), to: isoDate(now) };
+}
+
+// Group transactions into period buckets keyed by their starting unix-seconds.
+// Monthly = first of the month (label: month name); weekly = Monday of the week.
+function bucketSpendTransactions(transactions, bucket) {
+  const buckets = new Map();
+  for (const tx of transactions) {
+    const d = new Date((tx.date || 0) * 1000);
+    if (Number.isNaN(d.getTime())) continue;
+    let key;
+    let label;
+    if (bucket === "weekly") {
+      const day = d.getDay();
+      const offset = (day + 6) % 7;
+      const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - offset);
+      key = Math.floor(monday.getTime() / 1000);
+      label = monday.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    } else {
+      const first = new Date(d.getFullYear(), d.getMonth(), 1);
+      key = Math.floor(first.getTime() / 1000);
+      label = first.toLocaleDateString(undefined, { month: "short" });
+    }
+    const bucketEntry = buckets.get(key) || { key, label, total: 0, byPrimary: {} };
+    const primary = categoryPrimary(tx.category) || "OTHER";
+    bucketEntry.total += tx.amount || 0;
+    bucketEntry.byPrimary[primary] = (bucketEntry.byPrimary[primary] || 0) + (tx.amount || 0);
+    buckets.set(key, bucketEntry);
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.key - b.key);
+}
+
+function categoryTotals(transactions) {
+  const totals = {};
+  for (const tx of transactions) {
+    const primary = categoryPrimary(tx.category) || "OTHER";
+    totals[primary] = (totals[primary] || 0) + (tx.amount || 0);
+  }
+  return totals;
+}
+
+function createSpendBarChart(canvas, buckets, primariesInUse) {
+  if (!canvas || !window.Chart) return null;
+  const labels = buckets.map((b) => b.label);
+  const datasets = primariesInUse.map((primary) => ({
+    label: spendCategoryLabel(primary),
+    data: buckets.map((b) => Number((b.byPrimary[primary] || 0).toFixed(2))),
+    backgroundColor: spendCategoryColor(primary),
+    borderWidth: 0,
+    stack: "spend"
+  }));
+  return new window.Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { color: "#222", usePointStyle: true, boxWidth: 10 } },
+        tooltip: {
+          ...themeTooltipStyle,
+          filter: (item) => Math.abs(item.parsed.y || 0) >= 0.005,
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${currency(ctx.parsed.y)}`,
+            footer: (items) => {
+              const total = items.reduce((sum, it) => sum + (it.parsed.y || 0), 0);
+              return `Total: ${currency(total)}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: "#555" }, grid: { display: false } },
+        y: {
+          stacked: true,
+          ticks: { callback: (v) => compactCurrency(v), color: "#555" },
+          grid: { color: "rgba(34, 34, 34, 0.08)" }
+        }
+      }
+    }
+  });
+}
+
+function renderSpendCategoryTable(totals) {
+  const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  const grand = entries.reduce((sum, [, v]) => sum + v, 0);
+  if (entries.length === 0) {
+    return `<p class="muted-note" style="padding:0.75rem 0;">No spend in this range.</p>`;
+  }
+  const rows = entries
+    .map(([primary, amount]) => {
+      const pct = grand > 0 ? (amount / grand) * 100 : 0;
+      return `<tr class="spend-cat-row" data-primary="${escapeHtml(primary)}" title="Click to see transactions">
+        <td><span class="chip chip-category ${categoryChipClass(primary)}">${escapeHtml(spendCategoryLabel(primary))}</span></td>
+        <td class="num">${currency(amount)}</td>
+        <td class="num">${pct.toFixed(1)}%</td>
+      </tr>`;
+    })
+    .join("");
+  return `<table class="tx-table">
+    <thead><tr><th>Category</th><th class="num">Total</th><th class="num">Share</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><th>Total</th><th class="num">${currency(grand)}</th><th class="num">100.0%</th></tr></tfoot>
+  </table>`;
+}
+
+function renderSpendDrilldownTable(transactions) {
+  if (transactions.length === 0) {
+    return `<p class="muted-note" style="padding:0.75rem 0;">No transactions.</p>`;
+  }
+  const rows = transactions
+    .map((tx) => {
+      const merchant = tx.notes || "—";
+      return `<tr>
+        <td>${dateLabel(tx.date)}</td>
+        <td>${escapeHtml(merchant)}</td>
+        <td>${escapeHtml(tx.account || "")}</td>
+        <td class="num">${currency(tx.amount)}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Merchant</th><th>Account</th><th class="num">Amount</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+function openSpendCategoryDrilldown(primary) {
+  const matching = (state.spend.transactions || [])
+    .filter((tx) => (categoryPrimary(tx.category) || "OTHER") === primary)
+    .sort((a, b) => (b.date || 0) - (a.date || 0));
+
+  const heading = el.transactionsDialog.querySelector("h3");
+  if (heading) heading.textContent = `${spendCategoryLabel(primary)} — ${matching.length} transaction${matching.length === 1 ? "" : "s"}`;
+  el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderSpendDrilldownTable(matching)}</div>`;
+  el.transactionsDialog.showModal();
+}
+
+function renderSpendAnalysis() {
+  const txs = state.spend.transactions || [];
+  const buckets = bucketSpendTransactions(txs, state.spend.bucket);
+  const totals = categoryTotals(txs);
+  const primariesInUse = Object.entries(totals)
+    .sort((a, b) => b[1] - a[1])
+    .map(([primary]) => primary);
+
+  const grand = primariesInUse.reduce((sum, p) => sum + totals[p], 0);
+  const totalLabel = document.getElementById("spendTotalLabel");
+  if (totalLabel) {
+    totalLabel.textContent = `Total spend: ${currency(grand)} · ${txs.length} transactions`;
+  }
+
+  destroyChart("spendBar");
+  destroyChart("spendPie");
+  const barCanvas = document.getElementById("spendBarChart");
+  state.charts.spendBar = createSpendBarChart(barCanvas, buckets, primariesInUse);
+
+  const pieCanvas = document.getElementById("spendPieChart");
+  state.charts.spendPie = createPieChart(
+    pieCanvas,
+    primariesInUse.map(spendCategoryLabel),
+    primariesInUse.map((p) => Number(totals[p].toFixed(2))),
+    primariesInUse.map(spendCategoryColor)
+  );
+
+  const tableHost = document.getElementById("spendCategoryTable");
+  if (tableHost) {
+    tableHost.innerHTML = renderSpendCategoryTable(totals);
+    tableHost.querySelectorAll(".spend-cat-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const primary = row.dataset.primary;
+        if (primary) openSpendCategoryDrilldown(primary);
+      });
+    });
+  }
+}
+
+async function loadSpendData() {
+  if (state.spend.loading) return;
+  state.spend.loading = true;
+  try {
+    const { from, to } = rangeToDates(state.spend.range);
+    const payload = await apiGet(`/api/spend?from=${from}&to=${to}`);
+    state.spend.transactions = Array.isArray(payload.transactions) ? payload.transactions : [];
+    renderSpendAnalysis();
+  } catch (e) {
+    showFlash(`Failed to load spend: ${e.message}`);
+  } finally {
+    state.spend.loading = false;
+  }
+}
+
+function showSpendAnalysis() {
+  stopLiveRefreshTimer();
+  stopDashboardLiveRefreshTimer();
+  setMarketStateChip("UNKNOWN");
+  setPortfolioLastUpdatedChip(0);
+  setActiveView("spend");
+  setBreadcrumbs([
+    { label: "Assets", onClick: showDashboard },
+    { label: "Spend Analysis" }
+  ]);
+
+  const bucketSelect = document.getElementById("spendBucketSelect");
+  const rangeSelect = document.getElementById("spendRangeSelect");
+  if (bucketSelect) bucketSelect.value = state.spend.bucket;
+  if (rangeSelect) rangeSelect.value = state.spend.range;
+
+  loadSpendData();
+}
+
 function parseDateTimeLocalToUnix(value) {
   if (!value) {
     return null;
@@ -2944,6 +3215,25 @@ function wireEvents() {
   el.apiConfigToggle.addEventListener("click", toggleApiPanel);
   el.apiConfigForm.addEventListener("submit", saveApiBase);
   el.apiResetBtn.addEventListener("click", resetApiBase);
+
+  const backFromSpend = document.getElementById("backToDashFromSpendBtn");
+  if (backFromSpend) backFromSpend.addEventListener("click", showDashboard);
+  const spendBucketSelect = document.getElementById("spendBucketSelect");
+  if (spendBucketSelect) {
+    spendBucketSelect.addEventListener("change", (event) => {
+      state.spend.bucket = event.target.value;
+      localStorage.setItem("ft.spend.bucket", state.spend.bucket);
+      renderSpendAnalysis();
+    });
+  }
+  const spendRangeSelect = document.getElementById("spendRangeSelect");
+  if (spendRangeSelect) {
+    spendRangeSelect.addEventListener("change", (event) => {
+      state.spend.range = event.target.value;
+      localStorage.setItem("ft.spend.range", state.spend.range);
+      loadSpendData();
+    });
+  }
 }
 
 async function startPlaidConnect() {

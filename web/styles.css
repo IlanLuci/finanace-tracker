@@ -599,6 +599,10 @@ article.stock-card-neutral {
   border-bottom: 1px solid var(--line);
 }
 
+.spend-cat-row {
+  cursor: pointer;
+}
+
 .tx-table tbody tr:hover {
   background: #ebebeb;
 }
