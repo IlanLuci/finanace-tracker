@@ -29,8 +29,10 @@
 #include <mutex>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
+#include <zlib.h>
 
 namespace
 {
@@ -104,6 +106,7 @@ namespace
         int status = 200;
         std::string content_type = "application/json";
         std::string body;
+        std::map<std::string, std::string> headers;
     };
 
     enum class JsonType
@@ -1207,6 +1210,153 @@ namespace
         return fetch_ok;
     }
 
+    // Disk-read caches keyed by file path + (mtime, size). A fresh
+    // PortfolioManager is constructed per request, so these are process-global
+    // (like g_live_quote_cache) to survive across requests. Entries are
+    // validated by file metadata on every access: when a sync rewrites a
+    // portfolio or stock file its mtime/size change and the stale entry is
+    // re-read. Worst case on a concurrent write is one extra read, never a
+    // stale serve. The dashboard polls every 15s and recomputes the same
+    // portfolio/stock metrics several times per request, so caching parsed
+    // data turns that into a single parse per file per change.
+    std::mutex g_file_cache_mutex;
+
+    struct StockCacheEntry
+    {
+        std::filesystem::file_time_type mtime;
+        std::uintmax_t size;
+        StockData data;
+    };
+    std::unordered_map<std::string, StockCacheEntry> g_stock_cache;
+
+    struct PortfolioCacheEntry
+    {
+        std::filesystem::file_time_type mtime;
+        std::uintmax_t size;
+        Portfolio data;
+    };
+    std::unordered_map<std::string, PortfolioCacheEntry> g_portfolio_cache;
+
+    struct StockListCacheEntry
+    {
+        std::filesystem::file_time_type dir_mtime;
+        std::vector<std::string> tickers;
+    };
+    std::unordered_map<std::string, StockListCacheEntry> g_stock_list_cache;
+
+    bool loadStockDataCached(PortfolioManager& manager,
+                             const std::string& portfolio_name,
+                             const std::string& ticker,
+                             StockData& out)
+    {
+        const std::string path = manager.getStockFilePath(portfolio_name, ticker);
+        std::error_code ec;
+        const auto mtime = std::filesystem::last_write_time(path, ec);
+        if (ec)
+        {
+            return false;
+        }
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec)
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            auto it = g_stock_cache.find(path);
+            if (it != g_stock_cache.end() && it->second.mtime == mtime && it->second.size == size)
+            {
+                out = it->second.data;
+                return true;
+            }
+        }
+
+        StockData data;
+        if (!manager.loadStockData(portfolio_name, ticker, data))
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            g_stock_cache[path] = StockCacheEntry{mtime, size, data};
+        }
+        out = std::move(data);
+        return true;
+    }
+
+    bool loadPortfolioCached(PortfolioManager& manager,
+                             const std::string& name,
+                             Portfolio& out)
+    {
+        const std::string path = manager.getPortfolioFilePath(name);
+        std::error_code ec;
+        const auto mtime = std::filesystem::last_write_time(path, ec);
+        if (ec)
+        {
+            return false;
+        }
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec)
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            auto it = g_portfolio_cache.find(path);
+            if (it != g_portfolio_cache.end() && it->second.mtime == mtime && it->second.size == size)
+            {
+                out = it->second.data;
+                return true;
+            }
+        }
+
+        Portfolio data;
+        if (!manager.loadPortfolio(name, data))
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            g_portfolio_cache[path] = PortfolioCacheEntry{mtime, size, data};
+        }
+        out = std::move(data);
+        return true;
+    }
+
+    std::vector<std::string> listStocksCached(PortfolioManager& manager,
+                                              const std::string& portfolio_name)
+    {
+        const std::string dir = manager.getStocksDirectoryPath(portfolio_name);
+        std::error_code ec;
+        const auto dir_mtime = std::filesystem::last_write_time(dir, ec);
+        if (ec)
+        {
+            // No stocks directory yet (e.g. cash/debt/empty account).
+            return {};
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            auto it = g_stock_list_cache.find(dir);
+            if (it != g_stock_list_cache.end() && it->second.dir_mtime == dir_mtime)
+            {
+                return it->second.tickers;
+            }
+        }
+
+        std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+
+        {
+            std::lock_guard<std::mutex> lock(g_file_cache_mutex);
+            g_stock_list_cache[dir] = StockListCacheEntry{dir_mtime, tickers};
+        }
+        return tickers;
+    }
+
     // Returns USD-per-unit of the given foreign currency. USD -> 1.0.
     // Tries Yahoo Finance FX pair like "EURUSD=X" via the live-quote cache.
     // Returns 1.0 on lookup failure so totals still render (best-effort).
@@ -1751,12 +1901,12 @@ namespace
         }
 
         double total = cash_in_usd;
-        const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+        const std::vector<std::string> tickers = listStocksCached(manager, portfolio_name);
 
         for (const std::string& ticker : tickers)
         {
             StockData stock;
-            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            if (!loadStockDataCached(manager, portfolio_name, ticker, stock))
             {
                 continue;
             }
@@ -1797,11 +1947,11 @@ namespace
         previous_close_total = 0.0;
 
         bool has_previous_close = false;
-        const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+        const std::vector<std::string> tickers = listStocksCached(manager, portfolio_name);
         for (const std::string& ticker : tickers)
         {
             StockData stock;
-            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            if (!loadStockDataCached(manager, portfolio_name, ticker, stock))
             {
                 continue;
             }
@@ -1850,10 +2000,10 @@ namespace
         // (deposits, withdrawals, asset transfers) so they don't show up as
         // a fake "day change" on the dashboard.
         double day_change_amount = 0.0;
-        for (const std::string& ticker : manager.listStocks(portfolio_name))
+        for (const std::string& ticker : listStocksCached(manager, portfolio_name))
         {
             StockData stock;
-            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            if (!loadStockDataCached(manager, portfolio_name, ticker, stock))
             {
                 continue;
             }
@@ -2031,7 +2181,7 @@ namespace
             }
 
             Portfolio portfolio;
-            if (!manager.loadPortfolio(name, portfolio))
+            if (!loadPortfolioCached(manager, name, portfolio))
             {
                 continue;
             }
@@ -2070,7 +2220,7 @@ namespace
                 << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
                 << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
                 << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
-                << "\"stock_count\":" << manager.listStocks(name).size() << ","
+                << "\"stock_count\":" << listStocksCached(manager, name).size() << ","
                 << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
                 << "\"is_synced\":" << (is_synced ? "true" : "false") << ","
                 << "\"institution_name\":" << jsonString(institution_name) << ","
@@ -2104,7 +2254,7 @@ namespace
     std::string buildPortfolioDetailJson(PortfolioManager& manager, const std::string& name)
     {
         Portfolio portfolio;
-        if (!manager.loadPortfolio(name, portfolio))
+        if (!loadPortfolioCached(manager, name, portfolio))
         {
             return "";
         }
@@ -2137,9 +2287,9 @@ namespace
     std::string buildStocksJson(PortfolioManager& manager, const std::string& portfolio_name)
     {
         Portfolio portfolio;
-        const bool has_portfolio = manager.loadPortfolio(portfolio_name, portfolio);
+        const bool has_portfolio = loadPortfolioCached(manager, portfolio_name, portfolio);
         std::ostringstream out;
-        const std::vector<std::string> tickers = manager.listStocks(portfolio_name);
+        const std::vector<std::string> tickers = listStocksCached(manager, portfolio_name);
 
         out << "{\"portfolio\":" << jsonString(portfolio_name) << ",\"stocks\":[";
 
@@ -2147,7 +2297,7 @@ namespace
         for (const auto& ticker : tickers)
         {
             StockData stock;
-            if (!manager.loadStockData(portfolio_name, ticker, stock))
+            if (!loadStockDataCached(manager, portfolio_name, ticker, stock))
             {
                 continue;
             }
@@ -2361,6 +2511,7 @@ namespace
             case 200: return "OK";
             case 201: return "Created";
             case 204: return "No Content";
+            case 304: return "Not Modified";
             case 400: return "Bad Request";
             case 404: return "Not Found";
             case 405: return "Method Not Allowed";
@@ -2379,10 +2530,99 @@ namespace
         out << "Access-Control-Allow-Origin: *\r\n";
         out << "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
         out << "Access-Control-Allow-Headers: Content-Type\r\n";
+        for (const auto& header : response.headers)
+        {
+            out << header.first << ": " << header.second << "\r\n";
+        }
         out << "Content-Length: " << response.body.size() << "\r\n";
         out << "Connection: close\r\n\r\n";
         out << response.body;
         return out.str();
+    }
+
+    // gzip-compress for HTTP Content-Encoding. windowBits 15+16 emits a gzip
+    // wrapper (rather than raw zlib) so browsers decode it transparently.
+    bool gzipCompress(const std::string& input, std::string& output)
+    {
+        z_stream zs{};
+        if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        {
+            return false;
+        }
+
+        zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+        zs.avail_in = static_cast<uInt>(input.size());
+
+        output.clear();
+        char buffer[32768];
+        int ret = Z_OK;
+        do
+        {
+            zs.next_out = reinterpret_cast<Bytef*>(buffer);
+            zs.avail_out = sizeof(buffer);
+            ret = deflate(&zs, Z_FINISH);
+            if (ret == Z_STREAM_ERROR)
+            {
+                deflateEnd(&zs);
+                return false;
+            }
+            output.append(buffer, sizeof(buffer) - zs.avail_out);
+        } while (ret != Z_STREAM_END);
+
+        deflateEnd(&zs);
+        return true;
+    }
+
+    // FNV-1a 64-bit. Deterministic across process restarts so a client's stored
+    // ETag still matches after the server is rebuilt/restarted (unlike std::hash).
+    std::string weakEtagForBody(const std::string& body)
+    {
+        uint64_t hash = 1469598103934665603ULL;
+        for (unsigned char c : body)
+        {
+            hash ^= c;
+            hash *= 1099511628211ULL;
+        }
+        std::ostringstream out;
+        out << "\"" << std::hex << hash << "-" << body.size() << "\"";
+        return out.str();
+    }
+
+    // Adds ETag/Cache-Control and gzip to cacheable GET responses. ETag is
+    // computed over the uncompressed body so it is stable regardless of
+    // encoding; a matching If-None-Match short-circuits to 304 (no body).
+    void applyContentNegotiation(HttpResponse& response, const HttpRequest& request)
+    {
+        if (request.method != "GET" || response.status != 200 || response.body.empty())
+        {
+            return;
+        }
+
+        const std::string etag = weakEtagForBody(response.body);
+        response.headers["ETag"] = etag;
+        response.headers["Cache-Control"] = "no-cache";
+
+        auto if_none_match = request.headers.find("if-none-match");
+        if (if_none_match != request.headers.end() && if_none_match->second == etag)
+        {
+            response.status = 304;
+            response.body.clear();
+            return;
+        }
+
+        auto accept_encoding = request.headers.find("accept-encoding");
+        if (response.body.size() >= 1024 &&
+            accept_encoding != request.headers.end() &&
+            lowerCopy(accept_encoding->second).find("gzip") != std::string::npos)
+        {
+            std::string compressed;
+            if (gzipCompress(response.body, compressed) && compressed.size() < response.body.size())
+            {
+                response.body = std::move(compressed);
+                response.headers["Content-Encoding"] = "gzip";
+                response.headers["Vary"] = "Accept-Encoding";
+            }
+        }
     }
 
     bool sendAll(int client_fd, const std::string& data)
@@ -2806,7 +3046,7 @@ namespace
         {
             if (!manager.hasConnection(name)) continue;
             Portfolio p;
-            if (!manager.loadPortfolio(name, p)) continue;
+            if (!loadPortfolioCached(manager, name, p)) continue;
             for (const auto& t : p.getTransactions())
             {
                 if (t.date < lookback_floor) continue;
@@ -2947,7 +3187,7 @@ namespace
             for (const std::string& name : names)
             {
                 Portfolio portfolio;
-                if (!manager.loadPortfolio(name, portfolio)) continue;
+                if (!loadPortfolioCached(manager, name, portfolio)) continue;
                 const PortfolioType pt = portfolio.getType();
                 if (pt != PortfolioType::CASH && pt != PortfolioType::DEBT) continue;
 
@@ -3638,7 +3878,7 @@ namespace
             std::map<std::string, bool> unique_tickers;
             for (const std::string& name : portfolio_names)
             {
-                for (const std::string& ticker : manager.listStocks(name))
+                for (const std::string& ticker : listStocksCached(manager, name))
                 {
                     unique_tickers[upperCopy(trim(ticker))] = true;
                 }
@@ -3684,7 +3924,7 @@ namespace
             for (const std::string& name : portfolio_names)
             {
                 Portfolio portfolio;
-                if (!manager.loadPortfolio(name, portfolio))
+                if (!loadPortfolioCached(manager, name, portfolio))
                 {
                     continue;
                 }
@@ -3697,10 +3937,10 @@ namespace
                 double estimated_total_value = portfolio.getAvailableCapital();
                 size_t quote_count = 0;
 
-                for (const std::string& ticker : manager.listStocks(name))
+                for (const std::string& ticker : listStocksCached(manager, name))
                 {
                     StockData stock;
-                    if (!manager.loadStockData(name, ticker, stock))
+                    if (!loadStockDataCached(manager, name, ticker, stock))
                     {
                         continue;
                     }
@@ -4678,6 +4918,8 @@ bool PortfolioApiServer::start()
                             std::lock_guard<std::mutex> lock(g_data_access_mutex);
                             response = routeRequest(parsed_request, manager);
                         }
+
+                        applyContentNegotiation(response, parsed_request);
                     }
                 }
 

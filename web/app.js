@@ -347,7 +347,15 @@ const el = {
 const PERIOD_OPTIONS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
 
 const LIVE_REFRESH_INTERVAL_MS = 15000;
+// When the market is closed, quotes don't move, so poll far less often.
+const LIVE_REFRESH_CLOSED_INTERVAL_MS = 60000;
 const LIVE_REFRESH_REQUEST_TIMEOUT_MS = 10000;
+
+function liveRefreshIntervalMs(marketState) {
+  return isLiveMarketSession(marketState)
+    ? LIVE_REFRESH_INTERVAL_MS
+    : LIVE_REFRESH_CLOSED_INTERVAL_MS;
+}
 
 function unixNow() {
   return Math.floor(Date.now() / 1000);
@@ -1535,10 +1543,11 @@ function renderDashboard() {
                 <div class="sub">Subtracted from totals</div>
                 <div class="sub">${p.transaction_count} transaction${p.transaction_count === 1 ? "" : "s"}</div>`;
       } else {
+        const holdingsLabel = isCryptoPortfolio(p) ? "coins" : "stocks";
         body = `<div>${currency(p.estimated_total_value)}</div>
                 <div class="sub">Day: ${changeLabel(p.day_change_amount, p.day_change_percent)}</div>
                 <div class="sub">Cash: ${currency(p.available_capital)}</div>
-                <div class="sub">${p.stock_count} stocks • ${p.transaction_count} transactions</div>`;
+                <div class="sub">${p.stock_count} ${holdingsLabel} • ${p.transaction_count} transactions</div>`;
       }
       return `<article class="portfolio-card fade-up" data-name="${encodeURIComponent(p.name)}" ${animation}>
         ${header}
@@ -1775,7 +1784,6 @@ function pnlCellTone(value, hasBasis = true) {
 function holdingsTableColumns() {
   return [
     { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
-    { key: "company_name", label: "Company", align: "left", render: (r) => `<td class="company">${r.company_name}</td>` },
     { key: "shares_owned", label: "Shares", align: "right", render: (r) => `<td class="num">${sharesFormat(r.shares_owned)}</td>` },
     { key: "average_purchase_price", label: "Avg Cost", align: "right", render: (r) => `<td class="num">${currency(r.average_purchase_price)}</td>` },
     { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
@@ -1791,7 +1799,6 @@ function holdingsTableColumns() {
 function watchlistTableColumns() {
   return [
     { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
-    { key: "company_name", label: "Company", align: "left", render: (r) => `<td class="company">${r.company_name}</td>` },
     { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
     { key: "latest_close_date", label: "As Of", align: "right", render: (r) => `<td class="num">${r.latest_close_date ? dateLabel(r.latest_close_date) : "n/a"}</td>` }
   ];
@@ -1926,7 +1933,7 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
           state.stocksSort.dir = state.stocksSort.dir === "asc" ? "desc" : "asc";
         } else {
           state.stocksSort.key = key;
-          state.stocksSort.dir = (key === "ticker" || key === "company_name") ? "asc" : "desc";
+          state.stocksSort.dir = key === "ticker" ? "asc" : "desc";
         }
         renderPortfolioDetail(portfolio, stocks, recentTransactions);
       });
@@ -2242,14 +2249,14 @@ async function refreshPortfolioWithLivePrices(portfolioName) {
 
 function stopLiveRefreshTimer() {
   if (state.liveRefreshTimer) {
-    clearInterval(state.liveRefreshTimer);
+    clearTimeout(state.liveRefreshTimer);
     state.liveRefreshTimer = null;
   }
 }
 
 function stopDashboardLiveRefreshTimer() {
   if (state.dashboardLiveRefreshTimer) {
-    clearInterval(state.dashboardLiveRefreshTimer);
+    clearTimeout(state.dashboardLiveRefreshTimer);
     state.dashboardLiveRefreshTimer = null;
   }
 }
@@ -2359,23 +2366,66 @@ async function refreshDashboardWithLivePrices() {
   }
 }
 
+// Self-rescheduling timers (vs setInterval) so each tick can pick a new delay
+// based on the latest market state, and so polling pauses while the tab is
+// hidden. The visibilitychange handler restarts the active view's timer.
 function startDashboardLiveRefreshTimer() {
   stopDashboardLiveRefreshTimer();
-  state.dashboardLiveRefreshTimer = setInterval(() => {
-    refreshDashboardWithLivePrices();
-  }, LIVE_REFRESH_INTERVAL_MS);
+  if (document.hidden) {
+    return;
+  }
+  const tick = async () => {
+    await refreshDashboardWithLivePrices();
+    if (state.dashboardLiveRefreshTimer === null || document.hidden) {
+      return;
+    }
+    state.dashboardLiveRefreshTimer = setTimeout(tick, liveRefreshIntervalMs(state.dashboardMarketState));
+  };
+  state.dashboardLiveRefreshTimer = setTimeout(tick, liveRefreshIntervalMs(state.dashboardMarketState));
 }
 
 function startLiveRefreshTimer(portfolioName) {
   stopLiveRefreshTimer();
-  state.liveRefreshTimer = setInterval(() => {
+  if (document.hidden) {
+    return;
+  }
+  const tick = async () => {
     if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
       stopLiveRefreshTimer();
       return;
     }
+    await refreshPortfolioWithLivePrices(portfolioName);
+    if (state.liveRefreshTimer === null || document.hidden) {
+      return;
+    }
+    if (!state.currentPortfolio || state.currentPortfolio.name !== portfolioName) {
+      stopLiveRefreshTimer();
+      return;
+    }
+    state.liveRefreshTimer = setTimeout(tick, liveRefreshIntervalMs(state.liveMarketState));
+  };
+  state.liveRefreshTimer = setTimeout(tick, liveRefreshIntervalMs(state.liveMarketState));
+}
 
-    refreshPortfolioWithLivePrices(portfolioName);
-  }, LIVE_REFRESH_INTERVAL_MS);
+// Pause polling when the tab is backgrounded; resume (with an immediate
+// refresh) the timer for whatever view is active when it returns.
+function handleVisibilityChange() {
+  if (document.hidden) {
+    stopDashboardLiveRefreshTimer();
+    stopLiveRefreshTimer();
+    return;
+  }
+
+  if (state.currentPortfolio &&
+      !isCashPortfolio(state.currentPortfolio) &&
+      !isDebtPortfolio(state.currentPortfolio)) {
+    const name = state.currentPortfolio.name;
+    refreshPortfolioWithLivePrices(name);
+    startLiveRefreshTimer(name);
+  } else if (state.activeView === "dashboard") {
+    refreshDashboardWithLivePrices();
+    startDashboardLiveRefreshTimer();
+  }
 }
 
 function showStockDialog(stock) {
@@ -3335,6 +3385,7 @@ function init() {
   el.apiBaseInput.value = state.apiBase;
   setActiveView("dashboard");
   wireEvents();
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   updateTransactionFormVisibility();
   resetCreatePortfolioForm();
   loadDashboard();

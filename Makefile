@@ -1,6 +1,7 @@
 CXX = g++
 CXXFLAGS = -Wall -Wextra -std=c++17
 INCLUDES = -Iinclude
+LIBS = -lz
 
 SRC_DIR = src
 OBJ_DIR = obj
@@ -17,7 +18,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(OBJ_DIR)
@@ -27,7 +28,7 @@ run: $(TARGET)
 	./$(TARGET)
 
 $(TEST_PERSISTENCE_BIN): test_persistence.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/web_server.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 test-persistence: $(TEST_PERSISTENCE_BIN)
 	./$(TEST_PERSISTENCE_BIN) --data-dir data
