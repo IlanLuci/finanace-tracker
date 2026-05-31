@@ -5,6 +5,8 @@ const ACCOUNT_FILTER_KEY = "portfolio-account-filter";
 const CHART_PERIOD_KEY_PREFIX = "portfolio-chart-period:";
 const VALID_CHART_PERIODS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
 const DEFAULT_CHART_PERIOD = "6M";
+const API_CACHE_PREFIX = "ft.cache.";
+const LAST_SYNC_KEY = "ft.last-sync";
 
 function getChartPeriod(name) {
   const stored = localStorage.getItem(CHART_PERIOD_KEY_PREFIX + name);
@@ -626,6 +628,100 @@ function apiUrl(path) {
   return `${state.apiBase}${path}`;
 }
 
+function cacheKey(path) {
+  return API_CACHE_PREFIX + path;
+}
+
+function readCachedResponse(path) {
+  try {
+    const raw = localStorage.getItem(cacheKey(path));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCachedResponse(path, data) {
+  try {
+    localStorage.setItem(
+      cacheKey(path),
+      JSON.stringify({ ts: unixNow(), data })
+    );
+  } catch (_) {
+    // Quota or serialization error — ignore; cache is best-effort.
+  }
+}
+
+function getLastSyncTime() {
+  const v = Number(localStorage.getItem(LAST_SYNC_KEY));
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+function setLastSyncTime(ts) {
+  if (ts > 0) localStorage.setItem(LAST_SYNC_KEY, String(ts));
+}
+
+// fetch() throws TypeError when the network is unreachable; AbortError comes
+// from our own timeout when the server can't be reached either. HTTP error
+// responses (4xx/5xx with JSON body) are NOT network errors — those mean the
+// server is up and the request is malformed or rejected, and should not
+// degrade the UI into offline mode.
+function isNetworkError(error) {
+  if (!error) return false;
+  if (error.name === "TypeError") return true;
+  if (error.name === "AbortError") return true;
+  const msg = String(error.message || "").toLowerCase();
+  return (
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("load failed") ||
+    msg.includes("network request failed")
+  );
+}
+
+let offlineStateCached = false;
+
+function isOffline() {
+  return offlineStateCached || !navigator.onLine;
+}
+
+function setOfflineState(value) {
+  const next = Boolean(value);
+  if (offlineStateCached === next) return;
+  offlineStateCached = next;
+  renderOfflineBanner();
+}
+
+function formatRelativeTime(unixSeconds) {
+  if (!unixSeconds || unixSeconds <= 0) return "never";
+  const diff = Math.max(0, unixNow() - unixSeconds);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  const days = Math.floor(diff / 86400);
+  if (days < 30) return `${days}d ago`;
+  return new Date(unixSeconds * 1000).toLocaleDateString();
+}
+
+function renderOfflineBanner() {
+  const banner = document.getElementById("offlineBanner");
+  if (!banner) return;
+  const offline = isOffline();
+  if (!offline) {
+    banner.hidden = true;
+    return;
+  }
+  const ts = getLastSyncTime();
+  const detail = ts > 0
+    ? `Showing cached data from ${formatRelativeTime(ts)} (${new Date(ts * 1000).toLocaleString()}).`
+    : "No cached data yet — connect to the server to load your portfolios.";
+  banner.hidden = false;
+  banner.innerHTML = `<strong>You're offline.</strong> ${detail}`;
+}
+
 const PROGRESS_BAR_SHOW_DELAY_MS = 250;
 let inFlightRequests = 0;
 let progressShowTimer = null;
@@ -677,12 +773,27 @@ async function apiGet(path) {
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
     }
+    writeCachedResponse(path, data);
+    setLastSyncTime(unixNow());
+    setOfflineState(false);
     return data;
+  } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+      const cached = readCachedResponse(path);
+      if (cached) {
+        return cached.data;
+      }
+    }
+    throw error;
   } finally {
     endRequest();
   }
 }
 
+// Live-price endpoints intentionally do NOT use the offline cache — stale live
+// prices would be misleading. The dashboard already has a separate fallback
+// path that keeps the persisted snapshot visible when this throws.
 async function apiGetWithTimeout(path, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -694,8 +805,12 @@ async function apiGetWithTimeout(path, timeoutMs) {
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
     }
+    setOfflineState(false);
     return data;
   } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+    }
     if (error?.name === "AbortError") {
       throw new Error("Live request timed out");
     }
@@ -721,8 +836,14 @@ async function apiPost(path, body) {
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
     }
-
+    setOfflineState(false);
     return data;
+  } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+      throw new Error("You're offline — this change can't be saved until you reconnect.");
+    }
+    throw error;
   } finally {
     endRequest();
   }
@@ -739,8 +860,14 @@ async function apiDelete(path) {
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
     }
-
+    setOfflineState(false);
     return data;
+  } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+      throw new Error("You're offline — this change can't be saved until you reconnect.");
+    }
+    throw error;
   } finally {
     endRequest();
   }
@@ -3247,7 +3374,11 @@ async function loadDashboard() {
 
     showDashboard();
   } catch (error) {
-    showFlash(`Unable to load portfolios. ${error.message}. Check API Settings if needed.`);
+    if (isNetworkError(error) || isOffline()) {
+      showFlash("You're offline and no cached data is saved yet. Reconnect and reload.", "info");
+    } else {
+      showFlash(`Unable to load portfolios. ${error.message}. Check API Settings if needed.`);
+    }
     state.portfolios = [];
     renderDashboard();
     showDashboard();
@@ -3289,7 +3420,7 @@ function wireEvents() {
   el.deleteAccountBtn.addEventListener("click", openDeleteAccountDialog);
   el.deleteAccountCancelBtn.addEventListener("click", () => el.deleteAccountDialog.close());
   el.deleteAccountConfirmBtn.addEventListener("click", confirmDeleteAccount);
-  el.connectAccountBtn.addEventListener("click", startPlaidConnect);
+  el.connectAccountBtn.addEventListener("click", () => startPlaidConnect());
   el.syncAccountBtn.addEventListener("click", syncCurrentConnection);
   el.disconnectAccountBtn.addEventListener("click", disconnectCurrentConnection);
 
@@ -3421,13 +3552,39 @@ async function disconnectCurrentConnection() {
   }
 }
 
+function handleOnline() {
+  setOfflineState(false);
+  // Pull a fresh snapshot now that we're back. loadDashboard() is the same
+  // path used at startup, so this restores live data and (re)opens the saved
+  // portfolio if any.
+  loadDashboard();
+}
+
+function handleOffline() {
+  setOfflineState(true);
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  // The SW is only useful when the app is served over http(s); file:// origins
+  // cannot register one. Same-origin only — no apiBase here.
+  if (!/^https?:$/.test(window.location.protocol)) return;
+  navigator.serviceWorker.register("sw.js").catch(() => {
+    // Best-effort — offline cache for API responses still works without the SW.
+  });
+}
+
 function init() {
   el.apiBaseInput.value = state.apiBase;
   setActiveView("dashboard");
   wireEvents();
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("online", handleOnline);
+  window.addEventListener("offline", handleOffline);
   updateTransactionFormVisibility();
   resetCreatePortfolioForm();
+  renderOfflineBanner();
+  registerServiceWorker();
   loadDashboard();
 }
 
