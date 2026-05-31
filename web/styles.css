@@ -351,6 +351,24 @@ p {
   color: #c34b3d;
 }
 
+.reauth-chip {
+  border-color: var(--bad);
+  color: #c34b3d;
+  background: var(--bg);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.reauth-chip:hover:not(:disabled) {
+  background: var(--bad);
+  color: white;
+}
+
+.reauth-chip:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .chip-neutral {
   border-color: var(--line);
   color: var(--muted);
@@ -361,6 +379,20 @@ p {
   color: var(--accent, #2f6feb);
   font-size: 9pt;
   padding: 2px 6px;
+}
+
+.chip-pending {
+  border-color: var(--muted);
+  color: var(--muted);
+  background: var(--bg);
+  font-size: 9pt;
+  padding: 2px 6px;
+  font-style: italic;
+}
+
+.tx-row-pending td {
+  opacity: 0.7;
+  font-style: italic;
 }
 
 .chip-category {

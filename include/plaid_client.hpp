@@ -43,6 +43,12 @@ namespace Plaid
         bool        pending;
         std::string pfc_primary;      // personal_finance_category.primary, e.g. "TRANSFER_OUT", "FOOD_AND_DRINK"
         std::string pfc_detailed;     // personal_finance_category.detailed, e.g. "FOOD_AND_DRINK_RESTAURANTS"
+        // First (highest-confidence) counterparty Plaid identified, if any. Used
+        // to distinguish own-account transfers (counterparty_type=financial_institution)
+        // from peer-to-peer payments like Zelle to a friend (type=user/payment_app).
+        std::string counterparty_name;
+        std::string counterparty_type; // "financial_institution" | "user" | "payment_app" |
+                                       // "merchant" | "marketplace" | "income_source" | ""
 
         Transaction() : date(0), amount(0.0), pending(false) {}
     };
@@ -141,6 +147,13 @@ namespace Plaid
                                    std::vector<InvestmentTransaction>& out_transactions,
                                    std::vector<Security>& out_securities,
                                    std::string& error);
+
+    // True when the Plaid error string (typically of the form
+    // "HTTP 400: {\"error_code\":\"INVALID_ACCESS_TOKEN\",...}") indicates the
+    // access_token is no longer usable for this item: ITEM_LOGIN_REQUIRED (user
+    // creds expired), INVALID_ACCESS_TOKEN (token issued under a different
+    // client_id/env — e.g. after rotating PLAID_CLIENT_ID), or ITEM_NOT_FOUND.
+    bool errorRequiresReauth(const std::string& error);
 }
 
 #endif

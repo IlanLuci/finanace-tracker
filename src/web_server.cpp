@@ -66,6 +66,33 @@ namespace
         return local->tm_wday >= 1 && local->tm_wday <= 5;
     }
 
+    // Day change should only reflect movement during today's trading session.
+    // On weekends, holidays, or pre-market, the latest available close is from
+    // a prior trading day — comparing it to the day before that would surface
+    // Friday's gain on Saturday as if it were today's. Use local-day comparison
+    // so the cutoff aligns with the user's calendar, not the UTC day boundary.
+    bool isLatestPriceFromToday(time_t latest_date)
+    {
+        if (latest_date <= 0)
+        {
+            return false;
+        }
+        const time_t now = std::time(nullptr);
+        std::tm latest_tm{};
+        std::tm now_tm{};
+        {
+            std::tm* p = std::localtime(&latest_date);
+            if (p == nullptr) return false;
+            latest_tm = *p;
+        }
+        {
+            std::tm* p = std::localtime(&now);
+            if (p == nullptr) return false;
+            now_tm = *p;
+        }
+        return latest_tm.tm_year == now_tm.tm_year && latest_tm.tm_yday == now_tm.tm_yday;
+    }
+
     long long latestExpectedDailySyncDayLocal(time_t now)
     {
         long long day = dayBucketForTimestamp(now);
@@ -1965,6 +1992,11 @@ namespace
                 continue;
             }
 
+            if (!isLatestPriceFromToday(latest_date))
+            {
+                continue;
+            }
+
             day_change_amount += (latest_price - previous_price);
             previous_close_total += previous_price;
             has_previous_close = true;
@@ -2013,6 +2045,11 @@ namespace
             double previous_price = 0.0;
             time_t previous_date = 0;
             if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+            {
+                continue;
+            }
+
+            if (!isLatestPriceFromToday(latest_date))
             {
                 continue;
             }
@@ -2111,6 +2148,11 @@ namespace
             return 0.0;
         }
 
+        if (!isLatestPriceFromToday(latest_date))
+        {
+            return 0.0;
+        }
+
         return latest_price - previous_price;
     }
 
@@ -2121,6 +2163,11 @@ namespace
         double previous_price = 0.0;
         time_t previous_date = 0;
         if (!getLatestAndPreviousStockPrices(stock, latest_price, latest_date, previous_price, previous_date))
+        {
+            return 0.0;
+        }
+
+        if (!isLatestPriceFromToday(latest_date))
         {
             return 0.0;
         }
@@ -2201,12 +2248,16 @@ namespace
             // Cheap connection peek for the dashboard (no need to load full token).
             bool is_synced = manager.hasConnection(name);
             std::string institution_name;
+            bool needs_reauth = false;
+            time_t reauth_detected_at = 0;
             if (is_synced)
             {
                 PortfolioConnection peek;
                 if (manager.loadConnection(name, peek))
                 {
                     institution_name = peek.institution_name;
+                    needs_reauth = peek.needs_reauth;
+                    reauth_detected_at = peek.reauth_detected_at;
                 }
             }
 
@@ -2224,6 +2275,8 @@ namespace
                 << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
                 << "\"is_synced\":" << (is_synced ? "true" : "false") << ","
                 << "\"institution_name\":" << jsonString(institution_name) << ","
+                << "\"needs_reauth\":" << (needs_reauth ? "true" : "false") << ","
+                << "\"reauth_detected_at\":" << static_cast<long long>(reauth_detected_at) << ","
                 << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues())
                 << "}";
         }
@@ -2246,7 +2299,9 @@ namespace
             << "\"institution_id\":" << jsonString(conn.institution_id) << ","
             << "\"account_id\":" << jsonString(conn.account_id) << ","
             << "\"connected_at\":" << static_cast<long long>(conn.connected_at) << ","
-            << "\"last_synced\":" << static_cast<long long>(conn.last_synced)
+            << "\"last_synced\":" << static_cast<long long>(conn.last_synced) << ","
+            << "\"needs_reauth\":" << (conn.needs_reauth ? "true" : "false") << ","
+            << "\"reauth_detected_at\":" << static_cast<long long>(conn.reauth_detected_at)
             << "}";
         return out.str();
     }
@@ -3017,9 +3072,23 @@ namespace
         InTransitSummary() : total(0.0) {}
     };
 
+    // Pending Plaid txs are prefixed "[PENDING] " (see syncCashAccount). Strip
+    // it before further note-prefix checks so a pending transfer still matches
+    // "[TXFR] ".
+    bool notesIsPending(const std::string& notes)
+    {
+        return notes.compare(0, 10, "[PENDING] ") == 0;
+    }
+
+    std::string notesAfterPending(const std::string& notes)
+    {
+        return notesIsPending(notes) ? notes.substr(10) : notes;
+    }
+
     bool notesStartsWithTxfr(const std::string& notes)
     {
-        return notes.compare(0, 7, "[TXFR] ") == 0;
+        const std::string body = notesAfterPending(notes);
+        return body.compare(0, 7, "[TXFR] ") == 0;
     }
 
     InTransitSummary computeInTransit(PortfolioManager& manager)
@@ -3085,7 +3154,11 @@ namespace
             entry.portfolio_name = out.portfolio_name;
             entry.date = out.date;
             entry.amount = out_abs;
-            entry.notes = out.notes.size() > 7 ? out.notes.substr(7) : std::string();
+            // Strip optional "[PENDING] " then the required "[TXFR] " before display.
+            {
+                const std::string after_pending = notesAfterPending(out.notes);
+                entry.notes = after_pending.size() > 7 ? after_pending.substr(7) : std::string();
+            }
             result.entries.push_back(entry);
             result.total += out_abs;
         }
@@ -3196,8 +3269,13 @@ namespace
                     if (tx.type != TransactionType::WITHDRAWAL) continue;
                     if (tx.date < from || tx.date > to) continue;
 
+                    // Pending Plaid txs can change (amount/category) or get
+                    // reversed before posting, so they shouldn't influence the
+                    // spend totals. They reappear here once they post.
+                    if (notesIsPending(tx.notes)) continue;
+
                     // Strip inter-account transfers tagged by the sync path.
-                    if (tx.notes.size() >= 6 && tx.notes.compare(0, 6, "[TXFR]") == 0) continue;
+                    if (notesStartsWithTxfr(tx.notes)) continue;
 
                     const std::string upper_cat = upperCopy(tx.category);
                     if (upper_cat.rfind("TRANSFER_IN", 0) == 0) continue;
@@ -3237,6 +3315,95 @@ namespace
         return out.str();
     }
 
+    // Collect lowercased + normalized institution names from every connected
+    // portfolio so syncCashAccount can decide whether a Plaid TRANSFER is
+    // between the user's own connected accounts vs a peer-to-peer payment.
+    // Normalization strips a trailing " - <suffix>" (Plaid adds qualifiers
+    // like "Venmo - Personal") so a merchant_name of just "Venmo" still
+    // matches against the connection's institution_name.
+    std::string normalizeInstitutionName(const std::string& raw)
+    {
+        std::string lower = lowerCopy(raw);
+        const size_t dash = lower.find(" - ");
+        if (dash != std::string::npos) lower.resize(dash);
+        return trim(lower);
+    }
+
+    std::set<std::string> connectedInstitutionNamesLower(PortfolioManager& manager)
+    {
+        std::set<std::string> out;
+        manager.scanPortfolios();
+        for (const std::string& name : manager.getPortfolioNames())
+        {
+            if (!manager.hasConnection(name)) continue;
+            PortfolioConnection peek;
+            if (!manager.loadConnection(name, peek)) continue;
+            const std::string normalized = normalizeInstitutionName(peek.institution_name);
+            if (!normalized.empty()) out.insert(normalized);
+        }
+        return out;
+    }
+
+    // Decide whether a TRANSFER_IN/OUT Plaid transaction is between the user's
+    // own connected accounts (tag [TXFR], eligible for in-transit) vs a peer-
+    // to-peer payment like a Zelle/Venmo to a friend (count as a real outflow).
+    // Signals, strongest first:
+    //   1. Plaid enrichment: counterparty type "financial_institution" → own;
+    //      types "user" / "payment_app" → peer (overrides the name match so
+    //      "Venmo Payment to John" doesn't false-positive on the Venmo institution).
+    //   2. Name match: counterparty/merchant name contains, or is contained in,
+    //      a connected institution name (substring works either way to handle
+    //      "Venmo" ⇄ "Venmo - Personal" and "Wells" ⇄ "Wells Fargo").
+    bool transferIsOwnAccount(const Plaid::Transaction& tx,
+                              const std::set<std::string>& connected_institutions_lower)
+    {
+        // ATM/cash withdrawals are TRANSFER_OUT in Plaid's taxonomy but the
+        // money lands in the user's wallet, not another connected account, so
+        // there's no inflow to reconcile.
+        if (tx.pfc_detailed == "TRANSFER_OUT_WITHDRAWAL") return false;
+
+        // Name match is the strongest positive signal. It wins even when Plaid
+        // returns counterparty_type="payment_app" (Venmo is both a payment app
+        // AND a connected account here — the money to/from Venmo lands in the
+        // user's Venmo balance, which is own-account).
+        const std::string haystack = lowerCopy(
+            !tx.counterparty_name.empty() ? tx.counterparty_name :
+            (!tx.merchant_name.empty() ? tx.merchant_name : tx.name)
+        );
+        if (!haystack.empty())
+        {
+            for (const std::string& inst : connected_institutions_lower)
+            {
+                if (inst.size() < 3) continue;  // skip degenerate names that match too freely
+                if (haystack.find(inst) != std::string::npos) return true;
+                if (haystack.size() >= 3 && inst.find(haystack) != std::string::npos) return true;
+            }
+        }
+
+        // No name match. Trust Plaid's enrichment as a secondary signal —
+        // counterparty_type=financial_institution implies own-account even if
+        // the institution isn't in our connected set yet.
+        if (tx.counterparty_type == "financial_institution") return true;
+        return false;
+    }
+
+    // If a Plaid call surfaced ITEM_LOGIN_REQUIRED / INVALID_ACCESS_TOKEN / etc.,
+    // flag the connection so the UI can prompt the user to re-link and the
+    // hourly auto-sync stops hammering Plaid with a token that will never work.
+    void markConnectionReauthIfNeeded(PortfolioManager& manager,
+                                      const std::string& portfolio_name,
+                                      PortfolioConnection& conn,
+                                      const std::string& error)
+    {
+        if (!Plaid::errorRequiresReauth(error)) return;
+        if (conn.needs_reauth) return;  // already marked — no need to rewrite the file
+        conn.needs_reauth = true;
+        conn.reauth_detected_at = std::time(nullptr);
+        manager.saveConnection(portfolio_name, conn);
+        std::cerr << "[plaid] connection " << portfolio_name
+                  << " flagged for re-auth: " << error << std::endl;
+    }
+
     // Plaid /transactions/get sign: positive = money OUT. Our sign: positive = cash IN.
     // So for the cash path, our_amount = -plaid.amount.
     HttpResponse syncCashAccount(PortfolioManager& manager,
@@ -3253,6 +3420,7 @@ namespace
         if (!Plaid::getTransactions(plaid_config, conn.access_token,
                                     start_date, end_date, plaid_txs, plaid_error))
         {
+            markConnectionReauthIfNeeded(manager, portfolio_name, conn, plaid_error);
             return makeJsonResponse(502, makeErrorBody("Plaid sync failed: " + plaid_error));
         }
 
@@ -3261,7 +3429,10 @@ namespace
         for (const auto& tx : plaid_txs)
         {
             if (!conn.account_id.empty() && tx.account_id != conn.account_id) continue;
-            if (tx.pending) continue;
+            // Keep pending transactions so the user sees recent activity even
+            // before it posts at the bank. They're rebuilt from scratch on every
+            // sync (we don't merge), so when a pending row posts at Plaid it
+            // simply replaces itself with the posted row — no manual dedup needed.
             filtered.push_back(tx);
         }
 
@@ -3280,6 +3451,8 @@ namespace
             }
         }
 
+        const std::set<std::string> connected_institutions = connectedInstitutionNamesLower(manager);
+
         Portfolio rebuilt(original_portfolio.getType(), 0.0, original_portfolio.getCurrency());
         double tx_sum = 0.0;
         for (const auto& tx : filtered)
@@ -3289,13 +3462,24 @@ namespace
                 ? TransactionType::DEPOSIT
                 : TransactionType::WITHDRAWAL;
             const std::string display_name = !tx.merchant_name.empty() ? tx.merchant_name : tx.name;
-            // Tag Plaid-categorized transfers so cross-account matching can later
-            // identify money in transit between the user's own connected accounts.
-            const bool is_transfer =
+            // Only tag transfers we believe land in another connected account
+            // of the user's. Plaid tags Zelle-to-friend as TRANSFER_OUT too, but
+            // its counterparty type is "user" / "payment_app" — those should
+            // count as real outflows, not in-transit reconciliations.
+            const bool plaid_says_transfer =
                 tx.pfc_primary == "TRANSFER_IN" || tx.pfc_primary == "TRANSFER_OUT";
-            const std::string notes = is_transfer
+            const bool is_own_account_transfer =
+                plaid_says_transfer && transferIsOwnAccount(tx, connected_institutions);
+            std::string notes = is_own_account_transfer
                 ? std::string("[TXFR] ") + display_name
                 : display_name;
+            // Mark pending so the UI can render them differently and the user
+            // knows the balance anchor doesn't yet reflect this row. Prefix is
+            // detectable from JS without a schema change.
+            if (tx.pending)
+            {
+                notes = std::string("[PENDING] ") + notes;
+            }
             // Persist the spend category for later analysis (credit cards in particular).
             // Prefer Plaid's detailed PFC ("FOOD_AND_DRINK_RESTAURANTS"); fall back to primary.
             const std::string category = !tx.pfc_detailed.empty()
@@ -3351,6 +3535,7 @@ namespace
                                               start_date, end_date,
                                               inv_txs, securities_a, err))
         {
+            markConnectionReauthIfNeeded(manager, portfolio_name, conn, err);
             return makeJsonResponse(502, makeErrorBody("Plaid investments tx sync failed: " + err));
         }
 
@@ -3359,6 +3544,7 @@ namespace
         if (!Plaid::getHoldings(plaid_config, conn.access_token,
                                 holdings, securities_b, err))
         {
+            markConnectionReauthIfNeeded(manager, portfolio_name, conn, err);
             return makeJsonResponse(502, makeErrorBody("Plaid holdings fetch failed: " + err));
         }
 
@@ -3777,6 +3963,7 @@ namespace
         if (!Plaid::getAccounts(plaid_config, conn.access_token,
                                 accounts, ignored_inst_name, ignored_inst_id, err))
         {
+            markConnectionReauthIfNeeded(manager, portfolio_name, conn, err);
             return makeJsonResponse(502, makeErrorBody("Plaid accounts lookup failed: " + err));
         }
 
@@ -4664,15 +4851,25 @@ namespace
                     std::string chosen_account_id = requested_account;
                     if (chosen_account_id.empty()) chosen_account_id = accounts.front().account_id;
 
+                    // If a prior connection exists (e.g. user is reconnecting after
+                    // PLAID_CLIENT_ID was rotated and the old token is dead), preserve
+                    // the original connected_at and reset last_cursor — the new item_id
+                    // means Plaid's transactions/sync cursor from the old item is invalid.
                     PortfolioConnection conn;
+                    PortfolioConnection prior;
+                    const bool had_prior = manager.loadConnection(portfolio_name, prior);
                     conn.provider = "PLAID";
                     conn.institution_name = institution_name;
                     conn.institution_id = institution_id;
                     conn.item_id = item_id;
                     conn.access_token = access_token;
                     conn.account_id = chosen_account_id;
-                    conn.connected_at = std::time(nullptr);
+                    conn.connected_at = had_prior && prior.connected_at > 0
+                                          ? prior.connected_at
+                                          : std::time(nullptr);
                     conn.last_synced = 0;
+                    conn.needs_reauth = false;
+                    conn.reauth_detected_at = 0;
                     if (!manager.saveConnection(portfolio_name, conn))
                     {
                         return makeJsonResponse(500, makeErrorBody("Failed to persist connection"));
@@ -4839,6 +5036,15 @@ bool PortfolioApiServer::start()
                         for (const std::string& name : names)
                         {
                             if (!sync_manager.hasConnection(name))
+                            {
+                                ++skipped;
+                                continue;
+                            }
+                            // Skip connections that previously surfaced a stale-token
+                            // error — they need a fresh Plaid Link before they'll work
+                            // again. Hammering Plaid won't change that.
+                            PortfolioConnection peek;
+                            if (sync_manager.loadConnection(name, peek) && peek.needs_reauth)
                             {
                                 ++skipped;
                                 continue;

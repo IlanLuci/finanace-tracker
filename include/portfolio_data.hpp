@@ -159,8 +159,13 @@ struct PortfolioConnection
     time_t last_synced;            // unix ts of last successful sync; 0 = never
     time_t connected_at;           // unix ts the connection was created
     std::string last_cursor;       // Plaid /transactions/sync cursor (optional)
+    bool needs_reauth;             // true once Plaid signals the token is stale
+                                   // (ITEM_LOGIN_REQUIRED / INVALID_ACCESS_TOKEN /
+                                   // INVALID_CLIENT_ID — e.g. user rotated PLAID_CLIENT_ID)
+    time_t reauth_detected_at;     // unix ts we first saw the auth-required error
 
-    PortfolioConnection() : last_synced(0), connected_at(0) {}
+    PortfolioConnection()
+        : last_synced(0), connected_at(0), needs_reauth(false), reauth_detected_at(0) {}
 };
 
 // Main Portfolio class

@@ -2190,6 +2190,13 @@ bool PortfolioManager::loadConnection(const std::string& portfolio_name, Portfol
     long long ts = 0;
     if (jsonExtractNumberValue(content, "last_synced", ts)) connection.last_synced = static_cast<time_t>(ts);
     if (jsonExtractNumberValue(content, "connected_at", ts)) connection.connected_at = static_cast<time_t>(ts);
+    if (jsonExtractNumberValue(content, "reauth_detected_at", ts)) connection.reauth_detected_at = static_cast<time_t>(ts);
+
+    long long needs_reauth_num = 0;
+    if (jsonExtractNumberValue(content, "needs_reauth", needs_reauth_num))
+    {
+        connection.needs_reauth = (needs_reauth_num != 0);
+    }
 
     return !connection.provider.empty() && !connection.access_token.empty();
 }
@@ -2220,7 +2227,9 @@ bool PortfolioManager::saveConnection(const std::string& portfolio_name, const P
         << "  \"account_id\": " << jsonEscapeString(connection.account_id) << ",\n"
         << "  \"last_cursor\": " << jsonEscapeString(connection.last_cursor) << ",\n"
         << "  \"connected_at\": " << static_cast<long long>(connection.connected_at) << ",\n"
-        << "  \"last_synced\": " << static_cast<long long>(connection.last_synced) << "\n"
+        << "  \"last_synced\": " << static_cast<long long>(connection.last_synced) << ",\n"
+        << "  \"needs_reauth\": " << (connection.needs_reauth ? 1 : 0) << ",\n"
+        << "  \"reauth_detected_at\": " << static_cast<long long>(connection.reauth_detected_at) << "\n"
         << "}\n";
     return out.good();
 }

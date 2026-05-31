@@ -992,10 +992,18 @@ function mergeDailySeries(portfolios) {
     // DEBT portfolios reduce overall totals, so flip their stored balance
     // series to a negative contribution when building the aggregate.
     const sign = isDebtPortfolio(portfolio) ? -1 : 1;
+    // Foreign-currency cash accounts persist daily_values in native units, but
+    // estimated_total_value (what the Total Assets card sums) is USD-converted
+    // via fx_to_usd. Apply the same conversion here or the chart silently
+    // diverges from the card for every non-USD cash account.
+    const ccy = String(portfolio?.currency || "USD").toUpperCase();
+    const fx = (isCashPortfolio(portfolio) && ccy !== "USD")
+      ? (safeNumber(portfolio?.fx_to_usd) || 1)
+      : 1;
     const points = (portfolio.daily_values || [])
       .map((point) => ({
         date: safeNumber(point?.date),
-        value: safeNumber(point?.value) * sign
+        value: safeNumber(point?.value) * sign * fx
       }))
       .filter((point) => point.date > 0)
       .sort((a, b) => a.date - b.date);
@@ -1408,18 +1416,26 @@ function renderTransactionTable(transactions, options = {}) {
       const profitMarkup = hasProfit
         ? ` <span class="${tx.realized_profit >= 0 ? "positive" : "negative"}">(${tx.realized_profit >= 0 ? "+" : ""}${currency(tx.realized_profit)})</span>`
         : "";
-      const rawNotes = tx.notes || "";
+      let rawNotes = tx.notes || "";
+      // Backend prefixes pending Plaid txs with "[PENDING] " — strip it so the
+      // notes column stays clean and surface a separate "Pending" chip instead.
+      const isPending = rawNotes.startsWith("[PENDING] ");
+      if (isPending) rawNotes = rawNotes.slice(10);
       const isTransfer = rawNotes.startsWith("[TXFR] ");
       const cleanedNotes = isTransfer ? rawNotes.slice(7) : rawNotes;
+      const pendingBadge = isPending
+        ? `<span class="chip chip-pending" title="Pending at the bank — balance does not yet reflect this">Pending</span> `
+        : "";
       const transferBadge = isTransfer
         ? `<span class="chip chip-transfer" title="Identified as a transfer between connected accounts">Transfer</span> `
         : "";
       const catBadge = tx.category ? categoryChip(tx.category) + " " : "";
       const tickerSharesCells = hideTickerShares ? "" : `<td>${symbol}</td><td>${shares}</td>`;
       const notesCell = showNotes
-        ? `<td>${transferBadge}${catBadge}${cleanedNotes || "-"}</td>`
+        ? `<td>${pendingBadge}${transferBadge}${catBadge}${cleanedNotes || "-"}</td>`
         : "";
-      return `<tr>
+      const rowClass = isPending ? ' class="tx-row-pending"' : "";
+      return `<tr${rowClass}>
         <td>${dateLabel(tx.date)}</td>
         <td>${typeLabel(tx.type)}${profitMarkup}</td>
         ${tickerSharesCells}
@@ -1450,11 +1466,13 @@ function renderDashboard() {
 
   // DEBT accounts contribute a negative estimated_total_value (set server-side),
   // so the same reduce naturally subtracts outstanding balances from totals.
-  const rawTotalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
-  // Add back money that's left a source account but hasn't yet posted to the
-  // destination connected account — otherwise total assets dips temporarily.
+  const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  // We surface unmatched transfer outflows in the subline but no longer add
+  // them back to the total — the in-transit pile mixes own-account transfers
+  // (where add-back is correct) with peer-to-peer payments like Zelle to a
+  // friend (where add-back would mask a real outflow). Until we can reliably
+  // tell them apart (Plaid counterparties), don't risk inflating Total Assets.
   const inTransitTotal = Number(state.inTransit?.total) || 0;
-  const totalAssets = rawTotalAssets + inTransitTotal;
   // Convert each account's native-currency cash to USD before summing so foreign
   // cash accounts contribute correctly to the dashboard total. DEBT accounts
   // aren't cash and shouldn't inflate the cash metric.
@@ -1479,7 +1497,7 @@ function renderDashboard() {
 
   const accountCountSub = `${accountPortfolios.length} account${accountPortfolios.length === 1 ? "" : "s"}`;
   const totalAssetsSub = inTransitTotal > 0
-    ? `Incl. ${currency(inTransitTotal)} in transit between accounts`
+    ? `${currency(inTransitTotal)} in transit (not included)`
     : accountCountSub;
 
   const dashboardMetrics = `<section class="metric-grid">
@@ -1518,9 +1536,13 @@ function renderDashboard() {
       const syncBadge = p.is_synced
         ? `<span class="sync-badge" title="Auto-synced${p.institution_name ? " via " + escapeHtml(p.institution_name) : ""}" aria-label="Auto-synced account">⟳</span>`
         : "";
+      const reauthChip = p.needs_reauth
+        ? `<button type="button" class="chip reauth-chip" data-reauth-name="${encodeURIComponent(p.name)}" title="Plaid connection needs re-authentication" aria-label="Reconnect ${escapeHtml(portfolioDisplayName(p.name))}">Reconnect</button>`
+        : "";
       const header = `<div class="stock-top">
           <strong>${syncBadge}${portfolioDisplayName(p.name)}</strong>
           <span class="card-header-right">
+            ${reauthChip}
             <span class="chip">${typeLabel(p.type)}</span>
             <button type="button" class="pin-btn${pinned ? " is-pinned" : ""}" data-pin-name="${encodeURIComponent(p.name)}" title="${pinTitle}" aria-label="${pinTitle}">${pinIcon}</button>
           </span>
@@ -1620,7 +1642,7 @@ function renderDashboard() {
 
   document.querySelectorAll(".portfolio-card").forEach((card) => {
     card.addEventListener("click", (event) => {
-      if (event.target.closest(".pin-btn")) {
+      if (event.target.closest(".pin-btn") || event.target.closest(".reauth-chip")) {
         return;
       }
       const portfolioName = decodeURIComponent(card.dataset.name || "");
@@ -1635,6 +1657,15 @@ function renderDashboard() {
       if (!name) return;
       togglePinnedAccount(name);
       renderDashboard();
+    });
+  });
+
+  document.querySelectorAll(".reauth-chip").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const name = decodeURIComponent(btn.dataset.reauthName || "");
+      if (!name) return;
+      startPlaidConnect(name);
     });
   });
 
@@ -3286,15 +3317,23 @@ function wireEvents() {
   }
 }
 
-async function startPlaidConnect() {
-  if (!state.currentPortfolio) return;
+async function startPlaidConnect(portfolioName) {
+  // Two entry points: the portfolio-detail "Connect Account" button (no arg —
+  // uses the currently open portfolio) and the dashboard "Reconnect" chip
+  // (passes the portfolio name directly so the dashboard doesn't need to
+  // navigate into the account first).
+  const name = portfolioName || state.currentPortfolio?.name;
+  if (!name) return;
   if (typeof Plaid === "undefined" || !Plaid.create) {
     showFlash("Plaid Link could not load (network or ad blocker?).");
     return;
   }
-  const name = state.currentPortfolio.name;
+  const reconnectBtn = portfolioName
+    ? document.querySelector(`.reauth-chip[data-reauth-name="${encodeURIComponent(portfolioName)}"]`)
+    : null;
   try {
-    el.connectAccountBtn.disabled = true;
+    if (el.connectAccountBtn) el.connectAccountBtn.disabled = true;
+    if (reconnectBtn) reconnectBtn.disabled = true;
     showFlash("Opening Plaid Link…", "info");
     const resp = await apiPost(`/api/portfolios/${encodeURIComponent(name)}/connection/link-token`, {});
     hideFlash();
@@ -3344,7 +3383,8 @@ async function startPlaidConnect() {
   } catch (e) {
     showFlash(`Could not start Plaid Link: ${e.message}`);
   } finally {
-    el.connectAccountBtn.disabled = false;
+    if (el.connectAccountBtn) el.connectAccountBtn.disabled = false;
+    if (reconnectBtn) reconnectBtn.disabled = false;
   }
 }
 

@@ -602,6 +602,19 @@ bool getTransactions(const Config& config,
                     extractString(pfc_obj, "detailed", tx.pfc_detailed);
                 }
             }
+            // counterparties[] is the post-enrichment "who's on the other end" array.
+            // Take the first entry — Plaid orders by descending confidence, and we
+            // only need a single signal to classify the transfer.
+            size_t cp_pos = findValueStart(el, "counterparties");
+            if (cp_pos != std::string::npos && cp_pos < el.size() && el[cp_pos] == '[')
+            {
+                const std::vector<std::string> cp_elements = splitTopLevelArray(el, cp_pos);
+                if (!cp_elements.empty())
+                {
+                    extractString(cp_elements[0], "name", tx.counterparty_name);
+                    extractString(cp_elements[0], "type", tx.counterparty_type);
+                }
+            }
             if (!tx.transaction_id.empty()) out_transactions.push_back(tx);
         }
 
@@ -760,5 +773,18 @@ bool getInvestmentTransactions(const Config& config,
     }
 
     return true;
+}
+
+bool errorRequiresReauth(const std::string& error)
+{
+    // httpPostJson embeds the truncated response body into the error string:
+    // "HTTP 400: {\"error_code\":\"ITEM_LOGIN_REQUIRED\",...}". Plaid's error_code
+    // appears within the first ~200 chars, well inside the truncation window,
+    // so a substring search is sufficient.
+    if (error.find("ITEM_LOGIN_REQUIRED") != std::string::npos) return true;
+    if (error.find("INVALID_ACCESS_TOKEN") != std::string::npos) return true;
+    if (error.find("INVALID_CLIENT_ID") != std::string::npos) return true;
+    if (error.find("ITEM_NOT_FOUND") != std::string::npos) return true;
+    return false;
 }
 } // namespace Plaid
