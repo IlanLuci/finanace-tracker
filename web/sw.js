@@ -1,7 +1,7 @@
 // Bump this version whenever the cached asset list changes so old caches get
 // purged on activation. Versioned query strings on app.js/styles.css are part
 // of each cache key, so changing those will pull a fresh copy too.
-const CACHE_NAME = "finance-tracker-shell-v1";
+const CACHE_NAME = "finance-tracker-shell-v2";
 
 const APP_SHELL = [
   "./",
@@ -74,10 +74,18 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (!isCacheableShellRequest(request)) return;
 
+  // Versioned URLs (styles.css?v=…, app.js?v=…) ARE the cache-busting key —
+  // matching them without the query would shadow newer deploys behind the
+  // precached unversioned entry forever.
+  const url = new URL(request.url);
+  const isVersioned = url.searchParams.has("v");
+
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(request, { ignoreSearch: true });
+      const cached = isVersioned
+        ? await cache.match(request)
+        : await cache.match(request, { ignoreSearch: true });
 
       const networkFetch = fetch(request)
         .then((response) => {
@@ -98,6 +106,13 @@ self.addEventListener("fetch", (event) => {
 
       const networkResponse = await networkFetch;
       if (networkResponse) return networkResponse;
+
+      // Offline fallback for versioned assets: an older cached copy keyed
+      // without the query string is better than nothing.
+      if (isVersioned) {
+        const anyCached = await cache.match(request, { ignoreSearch: true });
+        if (anyCached) return anyCached;
+      }
 
       // Last-ditch fallback for navigation requests: serve the shell so the
       // SPA can still boot and show cached data with the offline banner.
