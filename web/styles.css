@@ -632,6 +632,11 @@ article.stock-card-neutral {
   color: var(--muted);
 }
 
+#recentTransactions {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .tx-table {
   width: 100%;
   border-collapse: collapse;
@@ -1142,10 +1147,16 @@ small {
   .dashboard-cards {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  #recentTransactions .tx-table th,
+  #recentTransactions .tx-table td {
+    white-space: nowrap;
+  }
 }
 
 .page-head-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
