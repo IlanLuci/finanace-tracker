@@ -171,6 +171,7 @@ p {
   width: 80%;
   margin: 30px auto 60px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
 }
 
@@ -180,6 +181,7 @@ p {
 
 .content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
 }
 
@@ -190,6 +192,7 @@ p {
 
 .view.is-active {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .breadcrumbs {
@@ -333,12 +336,13 @@ p {
 
 .graph-period-select {
   border: 1px solid var(--line);
-  background: var(--bg);
+  background-color: var(--bg);
   color: var(--ink);
   font: inherit;
   font-size: 10pt;
-  padding: 4px 8px;
+  padding: 4px 22px 4px 8px;
   cursor: pointer;
+  background-position: right 6px center;
 }
 
 .chart-tools .graph-period-select {
@@ -534,6 +538,7 @@ article.stock-card-neutral {
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
 }
 
 .stock-top strong {
@@ -541,6 +546,10 @@ article.stock-card-neutral {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-header-right {
@@ -680,6 +689,7 @@ article.stock-card-neutral {
   display: grid;
   gap: 8px;
   transition: background-color 0.06s;
+  min-width: 0;
 }
 
 .portfolio-card:hover {
@@ -752,6 +762,17 @@ select {
   padding: 8px 10px;
   background: var(--bg);
   color: var(--ink);
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+}
+
+select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path fill='none' stroke='%23222' stroke-width='1.2' d='M1 1l4 4 4-4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 6px;
+  padding-right: 28px;
 }
 
 input:focus,
@@ -1119,7 +1140,7 @@ small {
 
   .metric-grid,
   .dashboard-cards {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
