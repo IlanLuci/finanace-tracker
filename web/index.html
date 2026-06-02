@@ -7,10 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260601a" />
+  <link rel="stylesheet" href="styles.css?v=20260602a" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260531a" defer></script>
+  <script src="app.js?v=20260602a" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -76,7 +76,13 @@
                 <option value="1Y">1Y</option>
                 <option value="YTD">YTD</option>
                 <option value="ALL">ALL</option>
+                <option value="CUSTOM">Custom…</option>
               </select>
+              <span id="spendCustomRangeWrap" class="spend-custom-range" hidden>
+                <input id="spendCustomFrom" type="date" aria-label="From" />
+                <span class="spend-custom-sep">→</span>
+                <input id="spendCustomTo" type="date" aria-label="To" />
+              </span>
             </div>
           </div>
           <canvas id="spendBarChart" aria-label="Spend by category"></canvas>

@@ -268,6 +268,8 @@ const state = {
     transactions: [],
     bucket: localStorage.getItem("ft.spend.bucket") || "monthly",
     range: localStorage.getItem("ft.spend.range") || "3M",
+    customFrom: localStorage.getItem("ft.spend.customFrom") || "",
+    customTo: localStorage.getItem("ft.spend.customTo") || "",
     loading: false
   },
   stocksSort: { key: null, dir: null },
@@ -873,6 +875,34 @@ async function apiDelete(path) {
   }
 }
 
+async function apiPatch(path, body) {
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+    setOfflineState(false);
+    return data;
+  } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+      throw new Error("You're offline — this change can't be saved until you reconnect.");
+    }
+    throw error;
+  } finally {
+    endRequest();
+  }
+}
+
 function currency(value) {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
@@ -1050,6 +1080,8 @@ function normalizeStocks(rawStocks) {
       day_change_percent: safeNumber(stock.day_change_percent),
       position_day_change_amount: safeNumber(stock.position_day_change_amount),
       position_market_value: safeNumber(stock.position_market_value),
+      target_price: safeNumber(stock.target_price),
+      watchlist_notes: String(stock.watchlist_notes || ""),
       event_count: safeNumber(stock.event_count),
       recent_events: Array.isArray(stock.recent_events) ? stock.recent_events : []
     }));
@@ -1900,17 +1932,23 @@ function renderAllocationChart(stocks, portfolio) {
 
 function enrichStockRow(stock) {
   const perf = stockPerformance(stock);
+  const targetPrice = safeNumber(stock?.target_price);
+  const lastPrice = safeNumber(stock?.latest_close_price);
+  const targetDiff = (targetPrice > 0 && lastPrice > 0) ? (lastPrice - targetPrice) : 0;
   return {
     ticker: String(stock?.ticker || ""),
     company_name: String(stock?.company_name || ""),
     shares_owned: safeNumber(stock?.shares_owned),
     average_purchase_price: safeNumber(stock?.average_purchase_price),
-    latest_close_price: safeNumber(stock?.latest_close_price),
+    latest_close_price: lastPrice,
     day_change_amount: safeNumber(stock?.day_change_amount),
     day_change_percent: safeNumber(stock?.day_change_percent),
     position_day_change_amount: safeNumber(stock?.position_day_change_amount),
     position_market_value: safeNumber(stock?.position_market_value),
     latest_close_date: safeNumber(stock?.latest_close_date),
+    target_price: targetPrice,
+    target_diff: targetDiff,
+    watchlist_notes: String(stock?.watchlist_notes || ""),
     totalChange: perf.totalChange,
     percentChange: perf.percentChange,
     hasBasis: perf.hasBasis,
@@ -1954,10 +1992,30 @@ function holdingsTableColumns() {
   ];
 }
 
+function watchlistDiffCell(stock) {
+  const target = safeNumber(stock.target_price);
+  const last = safeNumber(stock.latest_close_price);
+  if (target <= 0 || last <= 0) {
+    return `<td class="num">—</td>`;
+  }
+  const diff = last - target;
+  const pct = (diff / target) * 100;
+  const tone = pnlCellTone(diff);
+  return `<td class="num ${tone}">${signedCurrency(diff)} <span class="sub">(${percentage(pct)})</span></td>`;
+}
+
 function watchlistTableColumns() {
   return [
-    { key: "ticker", label: "Ticker", align: "left", render: (r) => `<td class="ticker"><strong>${r.ticker}</strong></td>` },
+    { key: "ticker", label: "Ticker", align: "left", render: (r) => {
+        const stock = r._stock || r;
+        const hasNotes = String(stock.watchlist_notes || "").trim().length > 0;
+        const noteChip = hasNotes ? ` <span class="chip chip-neutral" title="Has notes">📝</span>` : "";
+        return `<td class="ticker"><strong>${stock.ticker}</strong>${noteChip}</td>`;
+      }
+    },
     { key: "latest_close_price", label: "Last Price", align: "right", render: (r) => `<td class="num">${currency(r.latest_close_price)}</td>` },
+    { key: "target_price", label: "Target", align: "right", render: (r) => `<td class="num">${safeNumber(r.target_price) > 0 ? currency(r.target_price) : "—"}</td>` },
+    { key: "target_diff", label: "vs Target", align: "right", render: (r) => watchlistDiffCell(r._stock || r) },
     { key: "latest_close_date", label: "As Of", align: "right", render: (r) => `<td class="num">${r.latest_close_date ? dateLabel(r.latest_close_date) : "n/a"}</td>` }
   ];
 }
@@ -2207,6 +2265,41 @@ async function removeWatchlistSymbol(ticker) {
     el.stockDialog.close();
     await openPortfolio(state.currentPortfolio.name);
     showFlash(`Removed ${ticker} from watchlist.`, "success");
+  } catch (error) {
+    showFlash(error.message);
+  }
+}
+
+async function saveWatchlistDetails(ticker) {
+  if (!state.currentPortfolio || !isWatchlistPortfolio(state.currentPortfolio)) {
+    return;
+  }
+
+  const priceInput = document.getElementById("watchlistTargetPrice");
+  const notesInput = document.getElementById("watchlistNotes");
+  const rawPrice = priceInput ? priceInput.value.trim() : "";
+  const notes = notesInput ? notesInput.value : "";
+
+  const body = { watchlist_notes: notes };
+  if (rawPrice === "") {
+    body.target_price = null;
+  } else {
+    const parsed = Number(rawPrice);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      showFlash("Target price must be a non-negative number.");
+      return;
+    }
+    body.target_price = parsed;
+  }
+
+  try {
+    await apiPatch(
+      `/api/portfolios/${encodeURIComponent(state.currentPortfolio.name)}/watchlist/${encodeURIComponent(ticker)}`,
+      body
+    );
+    el.stockDialog.close();
+    await openPortfolio(state.currentPortfolio.name);
+    showFlash(`Updated ${ticker}.`, "success");
   } catch (error) {
     showFlash(error.message);
   }
@@ -2591,6 +2684,25 @@ function showStockDialog(stock) {
 
   if (watchlist) {
     el.stockDialogTitle.textContent = `${stock.ticker} • ${stock.company_name || "Watchlist Symbol"}`;
+    const targetPrice = safeNumber(stock.target_price);
+    const lastPrice = safeNumber(stock.latest_close_price);
+    const hasTarget = targetPrice > 0;
+    const hasLast = lastPrice > 0;
+    let diffLabel = "—";
+    let diffStyle = "";
+    if (hasTarget && hasLast) {
+      const diff = lastPrice - targetPrice;
+      const pct = (diff / targetPrice) * 100;
+      if (diff > 0.0001) {
+        diffStyle = "color:#1b8b68;";
+      } else if (diff < -0.0001) {
+        diffStyle = "color:#c34b3d;";
+      }
+      diffLabel = `${signedCurrency(diff)} (${percentage(pct)})`;
+    }
+    const targetInputValue = hasTarget ? String(targetPrice) : "";
+    const notesValue = String(stock.watchlist_notes || "");
+
     el.stockDialogBody.innerHTML = `
       <article class="panel stock-dialog-summary stock-card-neutral">
         <div class="panel-head">
@@ -2598,18 +2710,45 @@ function showStockDialog(stock) {
           <button id="removeWatchlistSymbolBtn" class="ghost-btn" type="button">Remove Symbol</button>
         </div>
         <div class="stock-dialog-grid">
-          <div><span>Latest Price</span><strong>${currency(stock.latest_close_price)}</strong></div>
+          <div><span>Latest Price</span><strong>${currency(lastPrice)}</strong></div>
+          <div><span>Target Price</span><strong>${hasTarget ? currency(targetPrice) : "—"}</strong></div>
+          <div><span>vs Target</span><strong style="${diffStyle}">${diffLabel}</strong></div>
           <div><span>Day Change</span><strong>${changeLabel(stock.day_change_amount, stock.day_change_percent)}</strong></div>
           <div><span>As Of</span><strong>${stock.latest_close_date ? dateLabel(stock.latest_close_date) : "n/a"}</strong></div>
           <div><span>Ticker</span><strong>${stock.ticker}</strong></div>
-          <div><span>Mode</span><strong>Watchlist</strong></div>
         </div>
+      </article>
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Target &amp; Notes</h3>
+        </div>
+        <form id="watchlistEditForm" class="tx-form">
+          <div class="field-row">
+            <label for="watchlistTargetPrice">Target Price (leave blank to clear)</label>
+            <input id="watchlistTargetPrice" name="target_price" type="number" min="0" step="any" value="${escapeHtml(targetInputValue)}" placeholder="e.g. 200.00" />
+          </div>
+          <div class="field-row">
+            <label for="watchlistNotes">Notes</label>
+            <textarea id="watchlistNotes" name="watchlist_notes" rows="3" maxlength="4096" placeholder="Why are you watching this?">${escapeHtml(notesValue)}</textarea>
+          </div>
+          <div class="row-actions">
+            <button id="watchlistSaveBtn" class="primary-btn" type="submit">Save</button>
+          </div>
+        </form>
       </article>
     `;
 
     const removeBtn = document.getElementById("removeWatchlistSymbolBtn");
     if (removeBtn) {
       removeBtn.addEventListener("click", () => removeWatchlistSymbol(stock.ticker));
+    }
+
+    const form = document.getElementById("watchlistEditForm");
+    if (form) {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        saveWatchlistDetails(stock.ticker);
+      });
     }
 
     el.stockDialog.showModal();
@@ -2758,6 +2897,21 @@ function rangeToDates(range) {
   // Snap "from" to the first of a calendar month so each N-month range shows
   // exactly N month buckets (current month + N-1 prior months), not partial slices.
   const firstOfMonth = (offset) => new Date(now.getFullYear(), now.getMonth() - offset, 1);
+  const isoDate = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const isoLike = /^\d{4}-\d{2}-\d{2}$/;
+  if (range === "CUSTOM") {
+    const customFrom = state.spend.customFrom;
+    const customTo = state.spend.customTo;
+    const fromValid = isoLike.test(customFrom);
+    const toValid = isoLike.test(customTo);
+    const from = fromValid ? customFrom : isoDate(firstOfMonth(2));
+    let to = toValid ? customTo : isoDate(now);
+    if (fromValid && toValid && customTo < customFrom) {
+      to = customFrom;
+    }
+    return { from, to };
+  }
   let from;
   switch (range) {
     case "1M": from = firstOfMonth(0); break;
@@ -2768,9 +2922,13 @@ function rangeToDates(range) {
     case "ALL": from = new Date(2000, 0, 1); break;
     default: from = firstOfMonth(2);
   }
-  const isoDate = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   return { from: isoDate(from), to: isoDate(now) };
+}
+
+function updateSpendCustomRangeVisibility() {
+  const wrap = document.getElementById("spendCustomRangeWrap");
+  if (!wrap) return;
+  wrap.hidden = state.spend.range !== "CUSTOM";
 }
 
 // Group transactions into period buckets keyed by their starting unix-seconds.
@@ -2978,6 +3136,12 @@ function showSpendAnalysis() {
   const rangeSelect = document.getElementById("spendRangeSelect");
   if (bucketSelect) bucketSelect.value = state.spend.bucket;
   if (rangeSelect) rangeSelect.value = state.spend.range;
+
+  const customFromInput = document.getElementById("spendCustomFrom");
+  const customToInput = document.getElementById("spendCustomTo");
+  if (customFromInput) customFromInput.value = state.spend.customFrom || "";
+  if (customToInput) customToInput.value = state.spend.customTo || "";
+  updateSpendCustomRangeVisibility();
 
   loadSpendData();
 }
@@ -3443,9 +3607,29 @@ function wireEvents() {
     spendRangeSelect.addEventListener("change", (event) => {
       state.spend.range = event.target.value;
       localStorage.setItem("ft.spend.range", state.spend.range);
+      updateSpendCustomRangeVisibility();
+      if (state.spend.range === "CUSTOM" &&
+          !state.spend.customFrom && !state.spend.customTo) {
+        // Defer the fetch until the user picks dates; avoids a useless empty request.
+        return;
+      }
       loadSpendData();
     });
   }
+
+  const spendCustomFromInput = document.getElementById("spendCustomFrom");
+  const spendCustomToInput = document.getElementById("spendCustomTo");
+  const handleCustomChange = () => {
+    state.spend.customFrom = spendCustomFromInput ? spendCustomFromInput.value : "";
+    state.spend.customTo = spendCustomToInput ? spendCustomToInput.value : "";
+    localStorage.setItem("ft.spend.customFrom", state.spend.customFrom);
+    localStorage.setItem("ft.spend.customTo", state.spend.customTo);
+    if (state.spend.range !== "CUSTOM") return;
+    if (!state.spend.customFrom || !state.spend.customTo) return;
+    loadSpendData();
+  };
+  if (spendCustomFromInput) spendCustomFromInput.addEventListener("change", handleCustomChange);
+  if (spendCustomToInput) spendCustomToInput.addEventListener("change", handleCustomChange);
 }
 
 async function startPlaidConnect(portfolioName) {

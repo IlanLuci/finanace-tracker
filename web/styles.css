@@ -350,6 +350,26 @@ p {
   flex-shrink: 0;
 }
 
+.spend-custom-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spend-custom-range input[type="date"] {
+  border: 1px solid var(--line);
+  background-color: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10pt;
+  padding: 3px 6px;
+}
+
+.spend-custom-sep {
+  color: var(--muted);
+  font-size: 10pt;
+}
+
 .chip {
   font-size: 10pt;
   padding: 3px 8px;

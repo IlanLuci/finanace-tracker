@@ -19,7 +19,7 @@ namespace
     constexpr uint32_t CURRENT_PORTFOLIO_FILE_VERSION = 4;
     constexpr uint16_t MAX_CATEGORY_LENGTH = 128;
     constexpr uint32_t OLDEST_SUPPORTED_FILE_VERSION = 1;
-    constexpr uint32_t CURRENT_STOCK_FILE_VERSION = 1;
+    constexpr uint32_t CURRENT_STOCK_FILE_VERSION = 2;
     constexpr uint32_t OLDEST_SUPPORTED_STOCK_FILE_VERSION = 1;
     constexpr time_t SECONDS_PER_DAY = 86400;
     constexpr uint32_t MAX_DAILY_VALUES = 100000;
@@ -1001,14 +1001,14 @@ bool Portfolio::loadFromFile(const std::string& filepath)
 
 StockData::StockData()
     : version(CURRENT_STOCK_FILE_VERSION), shares_owned(0.0), average_purchase_price(0.0),
-      last_updated(0)
+      last_updated(0), target_price(0.0)
 {
 }
 
 StockData::StockData(const std::string& company, const std::string& ticker_symbol)
     : version(CURRENT_STOCK_FILE_VERSION), company_name(company),
       ticker(normalizeTicker(ticker_symbol)), shares_owned(0.0), average_purchase_price(0.0),
-      last_updated(std::time(nullptr))
+      last_updated(std::time(nullptr)), target_price(0.0)
 {
 }
 
@@ -1235,6 +1235,20 @@ bool StockData::saveToFile(const std::string& filepath) const
         file.write(reinterpret_cast<const char*>(&price.last_updated), sizeof(time_t));
     }
 
+    // v2+: watchlist target_price and free-form notes.
+    if (watchlist_notes.size() > MAX_NOTES_LENGTH)
+    {
+        std::cerr << "Error: Watchlist notes exceed supported limit" << std::endl;
+        return false;
+    }
+    file.write(reinterpret_cast<const char*>(&target_price), sizeof(double));
+    const uint16_t watchlist_notes_len = static_cast<uint16_t>(watchlist_notes.size());
+    file.write(reinterpret_cast<const char*>(&watchlist_notes_len), sizeof(uint16_t));
+    if (watchlist_notes_len > 0)
+    {
+        file.write(watchlist_notes.c_str(), watchlist_notes_len);
+    }
+
     file.close();
     return file.good();
 }
@@ -1432,6 +1446,38 @@ bool StockData::loadFromFile(const std::string& filepath)
         loaded_prices.emplace_back(date, close_price, updated_at);
     }
 
+    double loaded_target_price = 0.0;
+    std::string loaded_watchlist_notes;
+    if (loaded_version >= 2)
+    {
+        if (!readExact(file, reinterpret_cast<char*>(&loaded_target_price), sizeof(double)))
+        {
+            std::cerr << "Error: Corrupt stock file (target_price)" << std::endl;
+            return false;
+        }
+
+        uint16_t notes_len = 0;
+        if (!readExact(file, reinterpret_cast<char*>(&notes_len), sizeof(uint16_t)))
+        {
+            std::cerr << "Error: Corrupt stock file (watchlist notes length)" << std::endl;
+            return false;
+        }
+        if (notes_len > MAX_NOTES_LENGTH)
+        {
+            std::cerr << "Error: Watchlist notes length exceeds supported limit" << std::endl;
+            return false;
+        }
+        if (notes_len > 0)
+        {
+            loaded_watchlist_notes.resize(notes_len);
+            if (!readExact(file, &loaded_watchlist_notes[0], notes_len))
+            {
+                std::cerr << "Error: Corrupt stock file (watchlist notes)" << std::endl;
+                return false;
+            }
+        }
+    }
+
     version = loaded_version;
     ticker = normalizeTicker(loaded_ticker);
     company_name = loaded_company_name;
@@ -1440,6 +1486,10 @@ bool StockData::loadFromFile(const std::string& filepath)
     last_updated = loaded_last_updated;
     events = std::move(loaded_events);
     price_history = std::move(loaded_prices);
+    target_price = std::isfinite(loaded_target_price) && loaded_target_price > 0.0
+        ? loaded_target_price
+        : 0.0;
+    watchlist_notes = std::move(loaded_watchlist_notes);
 
     file.close();
     return true;

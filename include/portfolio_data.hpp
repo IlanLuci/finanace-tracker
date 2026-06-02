@@ -115,6 +115,8 @@ private:
     time_t last_updated;
     std::vector<StockEvent> events;
     std::vector<DailyStockPrice> price_history;
+    double target_price;             // Watchlist target/alert price; 0.0 = unset
+    std::string watchlist_notes;     // Free-form notes for watchlist items
 
 public:
     StockData();
@@ -128,9 +130,13 @@ public:
     time_t getLastUpdated() const { return last_updated; }
     const std::vector<StockEvent>& getEvents() const { return events; }
     const std::vector<DailyStockPrice>& getPriceHistory() const { return price_history; }
+    double getTargetPrice() const { return target_price; }
+    const std::string& getWatchlistNotes() const { return watchlist_notes; }
 
     void setCompanyName(const std::string& company) { company_name = company; }
     void setTicker(const std::string& ticker_symbol) { ticker = ticker_symbol; }
+    void setTargetPrice(double price) { target_price = price; }
+    void setWatchlistNotes(const std::string& notes) { watchlist_notes = notes; }
 
     bool recordBuy(time_t date, double shares, double price_per_share, const std::string& notes = "");
     bool recordSell(time_t date, double shares, double price_per_share, const std::string& notes = "");

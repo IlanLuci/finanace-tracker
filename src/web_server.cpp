@@ -2394,6 +2394,8 @@ namespace
                 << "\"day_change_percent\":" << jsonNumber(day_change_percent) << ","
                 << "\"position_day_change_amount\":" << jsonNumber(position_day_change_amount) << ","
                 << "\"position_market_value\":" << jsonNumber(display_market_value) << ","
+                << "\"target_price\":" << jsonNumber(stock.getTargetPrice()) << ","
+                << "\"watchlist_notes\":" << jsonString(stock.getWatchlistNotes()) << ","
                 << "\"event_count\":" << stock.getEvents().size() << ","
                 << "\"recent_events\":";
 
@@ -2583,7 +2585,7 @@ namespace
         out << "HTTP/1.1 " << response.status << " " << reasonPhraseForStatus(response.status) << "\r\n";
         out << "Content-Type: " << response.content_type << "\r\n";
         out << "Access-Control-Allow-Origin: *\r\n";
-        out << "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
+        out << "Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n";
         out << "Access-Control-Allow-Headers: Content-Type\r\n";
         for (const auto& header : response.headers)
         {
@@ -4473,9 +4475,111 @@ namespace
 
                 std::ostringstream out;
                 out << "{"
-                    << "\"status\":\"ok\"," 
+                    << "\"status\":\"ok\","
                     << "\"portfolio\":" << jsonString(portfolio_name) << ","
                     << "\"ticker\":" << jsonString(ticker)
+                    << "}";
+                return makeJsonResponse(200, out.str());
+            }
+
+            if (request.method == "PATCH" && segments.size() == 5 && segments[3] == "watchlist")
+            {
+                Portfolio portfolio;
+                if (!manager.loadPortfolio(portfolio_name, portfolio))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
+                }
+
+                if (portfolio.getType() != PortfolioType::WATCHLIST)
+                {
+                    return makeJsonResponse(409, makeErrorBody("watchlist endpoint is only available for WATCHLIST portfolios"));
+                }
+
+                const std::string ticker = upperCopy(trim(percentDecode(segments[4])));
+                if (ticker.empty())
+                {
+                    return makeJsonResponse(400, makeErrorBody("ticker is required"));
+                }
+
+                StockData stock;
+                if (!manager.loadStockData(portfolio_name, ticker, stock))
+                {
+                    return makeJsonResponse(404, makeErrorBody("Ticker was not found in watchlist"));
+                }
+
+                JsonValue body;
+                HttpResponse parse_error = parseJsonBodyObject(request, body);
+                if (parse_error.status != 200)
+                {
+                    return parse_error;
+                }
+
+                bool changed = false;
+                auto target_it = body.object_value.find("target_price");
+                if (target_it != body.object_value.end())
+                {
+                    if (target_it->second.type == JsonType::NIL)
+                    {
+                        stock.setTargetPrice(0.0);
+                        changed = true;
+                    }
+                    else if (target_it->second.type == JsonType::NUMBER)
+                    {
+                        const double value = target_it->second.number_value;
+                        if (!std::isfinite(value))
+                        {
+                            return makeJsonResponse(400, makeErrorBody("target_price must be a finite number"));
+                        }
+                        stock.setTargetPrice(value > 0.0 ? value : 0.0);
+                        changed = true;
+                    }
+                    else
+                    {
+                        return makeJsonResponse(400, makeErrorBody("target_price must be a number or null"));
+                    }
+                }
+
+                auto notes_it = body.object_value.find("watchlist_notes");
+                if (notes_it != body.object_value.end())
+                {
+                    if (notes_it->second.type == JsonType::NIL)
+                    {
+                        stock.setWatchlistNotes("");
+                        changed = true;
+                    }
+                    else if (notes_it->second.type == JsonType::STRING)
+                    {
+                        std::string notes = notes_it->second.string_value;
+                        if (notes.size() > 4096)
+                        {
+                            return makeJsonResponse(400, makeErrorBody("watchlist_notes exceeds 4096 character limit"));
+                        }
+                        stock.setWatchlistNotes(notes);
+                        changed = true;
+                    }
+                    else
+                    {
+                        return makeJsonResponse(400, makeErrorBody("watchlist_notes must be a string or null"));
+                    }
+                }
+
+                if (!changed)
+                {
+                    return makeJsonResponse(400, makeErrorBody("Provide target_price and/or watchlist_notes"));
+                }
+
+                if (!manager.saveStockData(portfolio_name, stock))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to save watchlist ticker"));
+                }
+
+                std::ostringstream out;
+                out << "{"
+                    << "\"status\":\"ok\","
+                    << "\"portfolio\":" << jsonString(portfolio_name) << ","
+                    << "\"ticker\":" << jsonString(ticker) << ","
+                    << "\"target_price\":" << jsonNumber(stock.getTargetPrice()) << ","
+                    << "\"watchlist_notes\":" << jsonString(stock.getWatchlistNotes())
                     << "}";
                 return makeJsonResponse(200, out.str());
             }
