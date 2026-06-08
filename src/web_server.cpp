@@ -3764,8 +3764,18 @@ namespace
             }
         }
 
+        // Trust the cash-equiv holdings sum directly — Plaid's account-level
+        // current_balance can lag a dividend/interest sweep into the MM fund
+        // by a day, while the per-holding institution_value reflects it
+        // immediately. Leftover (settlement cash beyond the MM fund) is what
+        // total minus stocks minus MM gives us, clamped at zero so a stale
+        // total can't drag cash below the holdings-reported MM balance.
+        double settlement_cash = plaid_total_account_value
+                                 - non_cash_holdings_value
+                                 - cash_equiv_value;
+        if (settlement_cash < 0.0) settlement_cash = 0.0;
         rebuilt.setAvailableCapital(have_balance_anchor
-            ? plaid_total_account_value - non_cash_holdings_value
+            ? cash_equiv_value + settlement_cash
             : running_cash + cash_equiv_value);
 
         // Plaid only returns ~2 years of transactions, so a ticker may have SELLs
