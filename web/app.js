@@ -5,6 +5,9 @@ const ACCOUNT_FILTER_KEY = "portfolio-account-filter";
 const CHART_PERIOD_KEY_PREFIX = "portfolio-chart-period:";
 const VALID_CHART_PERIODS = ["1M", "3M", "6M", "1Y", "3Y", "ALL"];
 const DEFAULT_CHART_PERIOD = "6M";
+const DASHBOARD_SCOPE_KEY = "portfolio-dashboard-scope";
+const VALID_DASHBOARD_SCOPES = ["ALL", "INVEST", "CASH"];
+const DEFAULT_DASHBOARD_SCOPE = "ALL";
 const API_CACHE_PREFIX = "ft.cache.";
 const LAST_SYNC_KEY = "ft.last-sync";
 
@@ -16,6 +19,20 @@ function getChartPeriod(name) {
 function setChartPeriod(name, value) {
   if (!VALID_CHART_PERIODS.includes(value)) return;
   localStorage.setItem(CHART_PERIOD_KEY_PREFIX + name, value);
+}
+
+function getDashboardScope() {
+  const stored = localStorage.getItem(DASHBOARD_SCOPE_KEY);
+  return VALID_DASHBOARD_SCOPES.includes(stored) ? stored : DEFAULT_DASHBOARD_SCOPE;
+}
+
+function setDashboardScope(value) {
+  if (!VALID_DASHBOARD_SCOPES.includes(value)) return;
+  if (value === DEFAULT_DASHBOARD_SCOPE) {
+    localStorage.removeItem(DASHBOARD_SCOPE_KEY);
+  } else {
+    localStorage.setItem(DASHBOARD_SCOPE_KEY, value);
+  }
 }
 
 const TYPE_SORT_ORDER = ["BROKERAGE", "ROTH_IRA", "TRADITIONAL_IRA", "CRYPTO", "CASH", "DEBT", "WATCHLIST"];
@@ -257,6 +274,7 @@ const state = {
     dashboard: getChartPeriod("dashboard"),
     portfolio: getChartPeriod("portfolio")
   },
+  dashboardScope: getDashboardScope(),
   charts: {
     dashboard: null,
     portfolio: null,
@@ -1208,6 +1226,86 @@ function mergeDailySeries(portfolios) {
   return out;
 }
 
+function buildBrokerageCashSeries(portfolio) {
+  // Mirror market_data_sync.cpp:recomputePortfolioDailyValues — backend doesn't
+  // persist a cash-only series for brokerages, so we rebuild it from txs here.
+  // initial_cash = current available_capital − Σ(non-cash-neutral tx.amount).
+  const txs = (state.allTransactions || {})[portfolio.name] || [];
+  const isCashNeutral = (t) => {
+    const u = String(t || "").toUpperCase();
+    return u === "TRANSFER_IN_ASSET" || u === "TRANSFER_OUT_ASSET";
+  };
+
+  const sorted = Array.isArray(txs)
+    ? txs.slice().sort((a, b) => safeNumber(a?.date) - safeNumber(b?.date))
+    : [];
+
+  let sumNonNeutral = 0;
+  sorted.forEach((tx) => {
+    if (!isCashNeutral(tx?.type)) sumNonNeutral += safeNumber(tx?.amount);
+  });
+  const initialCash = safeNumber(portfolio.available_capital) - sumNonNeutral;
+
+  if (!sorted.length) {
+    const cap = safeNumber(portfolio.available_capital);
+    if (Math.abs(cap) < 1e-9) return [];
+    const todayUnix = Math.floor(Date.now() / 1000 / 86400) * 86400 + 16 * 3600;
+    return [{ date: todayUnix, value: cap }];
+  }
+
+  const byDay = new Map();
+  let runningCash = initialCash;
+  sorted.forEach((tx) => {
+    if (!isCashNeutral(tx?.type)) runningCash += safeNumber(tx?.amount);
+    const day = Math.floor(safeNumber(tx?.date) / 86400);
+    if (day > 0) byDay.set(day, runningCash);
+  });
+
+  const todayDay = Math.floor(Date.now() / 1000 / 86400);
+  if (!byDay.has(todayDay)) byDay.set(todayDay, runningCash);
+
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([day, value]) => ({ date: day * 86400 + 16 * 3600, value }));
+}
+
+function portfoliosForDashboardScope(accountPortfolios, scope) {
+  switch (scope) {
+    case "INVEST":
+      return accountPortfolios.filter(
+        (p) => !isCashPortfolio(p) && !isDebtPortfolio(p)
+      );
+    case "CASH":
+      // Cash view = CASH + DEBT (full series), plus uninvested cash inside
+      // brokerage/crypto portfolios (synthesized from their tx history).
+      return accountPortfolios.map((p) => {
+        if (isCashPortfolio(p) || isDebtPortfolio(p)) return p;
+        return { ...p, daily_values: buildBrokerageCashSeries(p) };
+      });
+    default:
+      return accountPortfolios;
+  }
+}
+
+function dashboardScopeTitle(scope) {
+  switch (scope) {
+    case "INVEST": return "Investments Trend";
+    case "CASH": return "Cash Trend";
+    default: return "Total Asset Trend";
+  }
+}
+
+function dashboardScopeSelectMarkup(selectId, selectedScope) {
+  const options = [
+    { value: "ALL", label: "Total assets" },
+    { value: "INVEST", label: "Stocks + Crypto" },
+    { value: "CASH", label: "Cash" }
+  ]
+    .map((opt) => `<option value="${opt.value}"${opt.value === selectedScope ? " selected" : ""}>${opt.label}</option>`)
+    .join("");
+  return `<select id="${selectId}" class="graph-period-select" aria-label="Chart scope">${options}</select>`;
+}
+
 function daysForPeriod(period) {
   switch (period) {
     case "1M": return 30;
@@ -1752,8 +1850,9 @@ function renderDashboard() {
     ${dashboardMetrics}
     <article class="panel chart-panel fade-up">
       <div class="panel-head">
-        <h3>Total Asset Trend</h3>
+        <h3 id="dashboardChartTitle">${dashboardScopeTitle(state.dashboardScope)}</h3>
         <div class="chart-tools">
+          ${dashboardScopeSelectMarkup("dashboardScopeSelect", state.dashboardScope)}
           ${periodSelectMarkup("dashboardPeriodSelect", state.periods.dashboard)}
           <span id="dashboardMarketStateChip" class="chip chip-neutral">Market: n/a</span>
           <span id="dashboardLastUpdatedChip" class="chip chip-neutral">Updated: n/a</span>
@@ -1839,10 +1938,14 @@ function renderDashboard() {
   destroyChart("dashboard");
   const chartCanvas = document.getElementById(chartHostId);
   const dashboardPeriodSelect = document.getElementById("dashboardPeriodSelect");
+  const dashboardScopeSelect = document.getElementById("dashboardScopeSelect");
   const dashboardChangeChip = document.getElementById("dashboardChangeChip");
+  const dashboardChartTitle = document.getElementById("dashboardChartTitle");
 
   const drawDashboardChart = () => {
-    const filtered = filterPointsByPeriod(aggregateTrend, state.periods.dashboard);
+    const scopedPortfolios = portfoliosForDashboardScope(accountPortfolios, state.dashboardScope);
+    const scopedAggregate = mergeDailySeries(scopedPortfolios);
+    const filtered = filterPointsByPeriod(scopedAggregate, state.periods.dashboard);
     const trend = computeTrend(filtered);
     const color = trendColor(trend.percentChange);
 
@@ -1851,8 +1954,12 @@ function renderDashboard() {
       ? `Change: ${percentage(trend.percentChange)}`
       : "Change: n/a";
 
+    if (dashboardChartTitle) {
+      dashboardChartTitle.textContent = dashboardScopeTitle(state.dashboardScope);
+    }
+
     destroyChart("dashboard");
-    state.charts.dashboard = createLineChart(chartCanvas, filtered, "Total Assets", color);
+    state.charts.dashboard = createLineChart(chartCanvas, filtered, dashboardScopeTitle(state.dashboardScope), color);
   };
 
   dashboardPeriodSelect.addEventListener("change", (event) => {
@@ -1860,6 +1967,16 @@ function renderDashboard() {
     setChartPeriod("dashboard", state.periods.dashboard);
     drawDashboardChart();
   });
+
+  if (dashboardScopeSelect) {
+    dashboardScopeSelect.addEventListener("change", (event) => {
+      const next = event.target.value;
+      if (!VALID_DASHBOARD_SCOPES.includes(next)) return;
+      state.dashboardScope = next;
+      setDashboardScope(next);
+      drawDashboardChart();
+    });
+  }
 
   try {
     drawDashboardChart();
