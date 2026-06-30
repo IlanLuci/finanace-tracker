@@ -3945,15 +3945,20 @@ namespace
     HttpResponse syncPortfolioFromConnection(PortfolioManager& manager,
                                               const std::string& portfolio_name)
     {
+        // A missing/unreadable portfolio.dat is recoverable here: the sync paths
+        // below rebuild the portfolio from scratch off Plaid data and only read
+        // the type/currency from this object. If the file was lost (e.g. a failed
+        // write), recreate a starter portfolio further down once we know the
+        // account's type — otherwise a single missing file would 404 the hourly
+        // sync forever and the account would silently vanish from the dashboard.
         Portfolio portfolio;
-        if (!manager.loadPortfolio(portfolio_name, portfolio))
-        {
-            return makeJsonResponse(404, makeErrorBody("Portfolio not found"));
-        }
+        const bool had_portfolio = manager.loadPortfolio(portfolio_name, portfolio);
 
         PortfolioConnection conn;
         if (!manager.loadConnection(portfolio_name, conn))
         {
+            // Without a connection we have nothing to sync from, and (unlike a
+            // missing portfolio.dat) nothing to rebuild it. Keep the 404.
             return makeJsonResponse(404, makeErrorBody("No connection configured for this account"));
         }
 
@@ -3980,17 +3985,42 @@ namespace
         }
 
         std::string account_type;
+        std::string account_subtype;
         for (const auto& a : accounts)
         {
             if (a.account_id == conn.account_id)
             {
                 account_type = a.type;
+                account_subtype = a.subtype;
                 break;
             }
         }
         if (account_type.empty() && !accounts.empty())
         {
             account_type = accounts.front().type;
+            account_subtype = accounts.front().subtype;
+        }
+
+        if (!had_portfolio)
+        {
+            // portfolio.dat was missing — synthesize a starter portfolio so the
+            // rebuild below has the right type/currency to work from. The actual
+            // holdings, transactions and balances all come from Plaid.
+            PortfolioType recreated_type = PortfolioType::CASH;
+            if (account_type == "investment")
+            {
+                const std::string sub = lowerCopy(account_subtype);
+                if (sub.find("roth") != std::string::npos)
+                    recreated_type = PortfolioType::ROTH_IRA;
+                else if (sub.find("ira") != std::string::npos)
+                    recreated_type = PortfolioType::TRADITIONAL_IRA;
+                else
+                    recreated_type = PortfolioType::BROKERAGE;
+            }
+            portfolio = Portfolio(recreated_type, 0.0, "USD");
+            std::cerr << "[plaid] portfolio.dat missing for " << portfolio_name
+                      << "; recreating as " << portfolioTypeToString(recreated_type)
+                      << " from connection before sync" << std::endl;
         }
 
         if (account_type == "investment")
