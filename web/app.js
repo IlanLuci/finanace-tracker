@@ -1269,19 +1269,59 @@ function buildBrokerageCashSeries(portfolio) {
     .map(([day, value]) => ({ date: day * 86400 + 16 * 3600, value }));
 }
 
+function buildBrokeragePositionsSeries(portfolio) {
+  // Share value only = whole-account daily value − uninvested cash, aligned by
+  // day. A brokerage/crypto account's daily_values track the total close value
+  // (positions + cash); subtracting the synthesized cash series leaves just the
+  // holdings. Both inputs are sparse (account value on market closes, cash on tx
+  // days), so carry each forward across the union of days before subtracting.
+  const totalByDay = new Map();
+  (portfolio.daily_values || [])
+    .map((pt) => ({ day: Math.floor(safeNumber(pt?.date) / 86400), value: safeNumber(pt?.value) }))
+    .filter((pt) => pt.day > 0)
+    .sort((a, b) => a.day - b.day)
+    .forEach((pt) => totalByDay.set(pt.day, pt.value)); // later same-day entry wins
+
+  const cashByDay = new Map();
+  buildBrokerageCashSeries(portfolio).forEach((pt) => {
+    const day = Math.floor(safeNumber(pt?.date) / 86400);
+    if (day > 0) cashByDay.set(day, safeNumber(pt?.value));
+  });
+
+  const days = Array.from(new Set([...totalByDay.keys(), ...cashByDay.keys()])).sort((a, b) => a - b);
+  let lastTotal = null;
+  let lastCash = 0;
+  const out = [];
+  days.forEach((day) => {
+    if (totalByDay.has(day)) lastTotal = totalByDay.get(day);
+    if (cashByDay.has(day)) lastCash = cashByDay.get(day);
+    if (lastTotal !== null) {
+      out.push({ date: day * 86400 + 16 * 3600, value: lastTotal - lastCash });
+    }
+  });
+  return out;
+}
+
 function portfoliosForDashboardScope(accountPortfolios, scope) {
   switch (scope) {
     case "INVEST":
-      return accountPortfolios.filter(
-        (p) => !isCashPortfolio(p) && !isDebtPortfolio(p)
-      );
+      // Stocks + Crypto = share value only. Replace each account's whole-account
+      // series with a positions-only one; the uninvested cash it strips out
+      // shows up under the Cash view instead.
+      return accountPortfolios
+        .filter((p) => !isCashPortfolio(p) && !isDebtPortfolio(p))
+        .map((p) => ({ ...p, daily_values: buildBrokeragePositionsSeries(p) }));
     case "CASH":
-      // Cash view = CASH + DEBT (full series), plus uninvested cash inside
-      // brokerage/crypto portfolios (synthesized from their tx history).
-      return accountPortfolios.map((p) => {
-        if (isCashPortfolio(p) || isDebtPortfolio(p)) return p;
-        return { ...p, daily_values: buildBrokerageCashSeries(p) };
-      });
+      // Cash view = standalone CASH accounts plus the uninvested cash inside
+      // brokerage/crypto portfolios (synthesized from their tx history). DEBT is
+      // excluded so this matches the Total Available Cash card (which also
+      // ignores debt); debt only drags on the Total Assets line.
+      return accountPortfolios
+        .filter((p) => !isDebtPortfolio(p))
+        .map((p) => {
+          if (isCashPortfolio(p)) return p;
+          return { ...p, daily_values: buildBrokerageCashSeries(p) };
+        });
     default:
       return accountPortfolios;
   }
