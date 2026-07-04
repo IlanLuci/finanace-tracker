@@ -507,6 +507,54 @@ namespace MarketDataSync
         return SyncConfig{};
     }
 
+    bool fetchHistoricalClose(const std::string& symbol, time_t date,
+                              double& out_price, std::string& error)
+    {
+        const std::string normalized = normalizeTicker(symbol);
+        if (normalized.empty())
+        {
+            error = "Empty ticker symbol";
+            return false;
+        }
+
+        std::string body;
+        if (!fetchFromYahoo(normalized, body, error))
+        {
+            return false;
+        }
+
+        std::map<long long, double> prices_by_day;
+        if (!parseDailyCloseSeriesFromYahoo(body, prices_by_day, error))
+        {
+            return false;
+        }
+
+        // Pick the available close whose day bucket is nearest the requested date.
+        // Yahoo's 2y window may start slightly after a synth date planted exactly
+        // 2 years ago, so an exact-day match is not guaranteed.
+        const long long target_day = dayBucket(date);
+        bool found = false;
+        long long best_distance = 0;
+        for (const auto& entry : prices_by_day)
+        {
+            const long long distance = std::llabs(entry.first - target_day);
+            if (!found || distance < best_distance)
+            {
+                found = true;
+                best_distance = distance;
+                out_price = entry.second;
+            }
+        }
+
+        if (!found)
+        {
+            error = "No historical close prices available for " + normalized;
+            return false;
+        }
+
+        return true;
+    }
+
     bool recomputePortfolioDailyValues(PortfolioManager& manager, const std::string& portfolio_name)
     {
         Portfolio portfolio;

@@ -3786,7 +3786,13 @@ namespace
         const time_t now = std::time(nullptr);
         const time_t fallback_synth_date = now - (2LL * 365 * 86400); // 2 years ago
 
-        const auto perShareBasisFromHolding = [&](const std::string& ticker) -> double
+        // Derives a per-share cost basis for a synthesized "prior history" buy.
+        // Prefers the live holding's reported basis; when the position is no
+        // longer held (e.g. fully sold, so Plaid reports no holding), falls back
+        // to the ticker's historical market close on `when` so the synthesized
+        // buy has a realistic cost basis instead of $0 — otherwise a later SELL
+        // shows the entire proceeds as realized profit.
+        const auto perShareBasisFromHolding = [&](const std::string& ticker, time_t when) -> double
         {
             for (const auto& h : holdings)
             {
@@ -3799,7 +3805,20 @@ namespace
                     return h.cost_basis / h.quantity;
                 }
                 if (h.institution_price > 0.0) return h.institution_price;
-                return 0.0;
+                break;
+            }
+
+            double historical_price = 0.0;
+            std::string hist_err;
+            if (MarketDataSync::fetchHistoricalClose(ticker, when, historical_price, hist_err) &&
+                historical_price > 0.0)
+            {
+                return historical_price;
+            }
+            if (!hist_err.empty())
+            {
+                std::cerr << "Historical cost-basis lookup failed for " << ticker
+                          << ": " << hist_err << std::endl;
             }
             return 0.0;
         };
@@ -3856,7 +3875,7 @@ namespace
                 {
                     when = earliest[tk] - 86400;
                 }
-                addSynthBuy(when, tk, kv.second, perShareBasisFromHolding(tk),
+                addSynthBuy(when, tk, kv.second, perShareBasisFromHolding(tk, when),
                             "Imported from prior history");
             }
         }
@@ -3902,7 +3921,7 @@ namespace
                     // "materializing" right before that add-on.
                     time_t when = fallback_synth_date;
                     if (earliest_set && earliest - 86400 < when) when = earliest - 86400;
-                    addSynthBuy(when, ticker, diff, perShareBasisFromHolding(ticker),
+                    addSynthBuy(when, ticker, diff, perShareBasisFromHolding(ticker, when),
                                 "Imported from prior history");
                 }
                 else
