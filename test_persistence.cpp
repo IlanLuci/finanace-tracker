@@ -1,5 +1,6 @@
 #include "portfolio_data.hpp"
 #include "file_utils.hpp"
+#include "market_data_sync.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -222,6 +223,80 @@ int main(int argc, char** argv)
     {
         std::cerr << "✗ API-only stock was incorrectly pruned" << std::endl;
         return 1;
+    }
+
+    // Positions whose ticker has no fetched price history must be valued at
+    // cost basis when recomputing daily values — not silently at $0.
+    // (Regression: flaky-network Yahoo fetch failures left tickers with empty
+    // price history, zeroing their contribution to portfolio totals/profits.)
+    const std::string valuation_portfolio_name = "Valuation_Test";
+    manager.deletePortfolio(valuation_portfolio_name);
+
+    if (!manager.createPortfolio(valuation_portfolio_name, PortfolioType::BROKERAGE, 1000.0))
+    {
+        std::cerr << "✗ Failed to create valuation test portfolio" << std::endl;
+        return 1;
+    }
+
+    Portfolio valuation_portfolio;
+    if (!manager.loadPortfolio(valuation_portfolio_name, valuation_portfolio))
+    {
+        std::cerr << "✗ Failed to load valuation test portfolio" << std::endl;
+        return 1;
+    }
+
+    // NOPX: 10 shares @ $50, no price history at all (fetch never succeeded).
+    valuation_portfolio.addTransaction(now - 86400 * 5, -500.0, TransactionType::BUY_STOCK, "NOPX", 10.0, "Buy without market data");
+    // PXY: 5 shares @ $20, has a real close price that must win over cost basis.
+    valuation_portfolio.addTransaction(now - 86400 * 5, -100.0, TransactionType::BUY_STOCK, "PXY", 5.0, "Buy with market data");
+
+    if (!manager.savePortfolio(valuation_portfolio_name, valuation_portfolio))
+    {
+        std::cerr << "✗ Failed to save valuation test portfolio" << std::endl;
+        return 1;
+    }
+
+    StockData pxy;
+    if (!manager.loadStockData(valuation_portfolio_name, "PXY", pxy))
+    {
+        std::cerr << "✗ Failed to load PXY stock data" << std::endl;
+        return 1;
+    }
+    pxy.addDailyClosePrice(now, 30.0);
+    if (!manager.saveStockData(valuation_portfolio_name, pxy))
+    {
+        std::cerr << "✗ Failed to save PXY price history" << std::endl;
+        return 1;
+    }
+
+    if (!MarketDataSync::recomputePortfolioDailyValues(manager, valuation_portfolio_name))
+    {
+        std::cerr << "✗ Failed to recompute daily values for valuation test" << std::endl;
+        return 1;
+    }
+
+    Portfolio valued_portfolio;
+    if (!manager.loadPortfolio(valuation_portfolio_name, valued_portfolio))
+    {
+        std::cerr << "✗ Failed to reload valuation test portfolio" << std::endl;
+        return 1;
+    }
+
+    // Cash after both buys: 1000. NOPX fallback: 10 * $50 = 500. PXY close: 5 * $30 = 150.
+    const double expected_total = 1000.0 + 500.0 + 150.0;
+    const double actual_total = valued_portfolio.getCurrentPortfolioValue();
+    std::cout << "\n  Valuation with missing price history: expected "
+              << FileUtils::formatCurrency(expected_total) << ", got "
+              << FileUtils::formatCurrency(actual_total) << std::endl;
+    if (std::abs(actual_total - expected_total) > 1e-6)
+    {
+        std::cerr << "✗ Position without price history was not valued at cost basis" << std::endl;
+        return 1;
+    }
+
+    if (!keep_test_data)
+    {
+        manager.deletePortfolio(valuation_portfolio_name);
     }
 
     // Verify startup recovery logic for .tmp/.bak artifacts and stale lock dirs.

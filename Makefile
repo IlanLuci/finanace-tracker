@@ -27,7 +27,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 run: $(TARGET)
 	./$(TARGET)
 
-$(TEST_PERSISTENCE_BIN): test_persistence.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/web_server.cpp
+$(TEST_PERSISTENCE_BIN): test_persistence.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/plaid_client.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 test-persistence: $(TEST_PERSISTENCE_BIN)

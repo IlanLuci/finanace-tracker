@@ -1941,6 +1941,9 @@ namespace
             const auto& prices = stock.getPriceHistory();
             if (prices.empty())
             {
+                // No market data (e.g. Yahoo fetch has never succeeded for this
+                // ticker) — value the position at cost basis rather than $0.
+                total += stock.getSharesOwned() * stock.getAveragePurchasePrice();
                 continue;
             }
 
@@ -2370,6 +2373,13 @@ namespace
             if (!stock.getPriceHistory().empty())
             {
                 getLatestAndPreviousStockPrices(stock, latest_price, latest_price_date, previous_price, previous_price_date);
+            }
+            if (latest_price <= 0.0)
+            {
+                // No market close available (fetch never succeeded) — fall back
+                // to cost basis so the position isn't shown as a $0 / -100% loss.
+                // latest_close_date stays 0 to signal the price is not a real close.
+                latest_price = stock.getAveragePurchasePrice();
             }
 
             const double day_change_amount = calculateStockDayChangeAmount(stock);
@@ -3577,11 +3587,12 @@ namespace
             return conn.account_id.empty() || acct == conn.account_id;
         };
 
-        // Wipe existing stocks
-        for (const auto& ticker : manager.listStocks(portfolio_name))
-        {
-            manager.deleteStock(portfolio_name, ticker);
-        }
+        // NOTE: stock files are intentionally NOT wiped here. Deleting them
+        // destroys each ticker's fetched price history, and if the Yahoo
+        // re-fetch after the rebuild fails (flaky network) the position is
+        // left priceless and valued at $0 in totals/profits. Stale tickers
+        // are pruned after the rebuilt transaction set is known, just before
+        // savePortfolio below.
 
         // Rebuild portfolio from scratch
         Portfolio rebuilt(original_portfolio.getType(), 0.0, original_portfolio.getCurrency());
@@ -3933,6 +3944,43 @@ namespace
                 }
             }
             ++holdings_imported;
+        }
+
+        // Prune stock files whose ticker no longer appears anywhere in the
+        // rebuilt transaction history (position dropped out of Plaid's window
+        // entirely). Files for still-referenced tickers are kept so their
+        // fetched price history survives the rebuild.
+        {
+            const auto normalizedTicker = [](const std::string& raw)
+            {
+                std::string normalized;
+                normalized.reserve(raw.size());
+                for (const char ch : raw)
+                {
+                    const unsigned char uch = static_cast<unsigned char>(ch);
+                    if (std::isalnum(uch) || ch == '_' || ch == '-' || ch == '.')
+                    {
+                        normalized.push_back(static_cast<char>(std::toupper(uch)));
+                    }
+                }
+                return normalized;
+            };
+
+            std::set<std::string> rebuilt_tickers;
+            for (const auto& tx : rebuilt.getTransactions())
+            {
+                if (!tx.stock_symbol.empty())
+                {
+                    rebuilt_tickers.insert(normalizedTicker(tx.stock_symbol));
+                }
+            }
+            for (const auto& ticker : manager.listStocks(portfolio_name))
+            {
+                if (rebuilt_tickers.count(normalizedTicker(ticker)) == 0)
+                {
+                    manager.deleteStock(portfolio_name, ticker);
+                }
+            }
         }
 
         if (!manager.savePortfolio(portfolio_name, rebuilt))

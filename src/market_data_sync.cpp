@@ -116,9 +116,9 @@ namespace
         return escaped;
     }
 
-    bool fetchFromYahoo(const std::string& symbol,
-                        std::string& response_body,
-                        std::string& error)
+    bool fetchFromYahooOnce(const std::string& symbol,
+                            std::string& response_body,
+                            std::string& error)
     {
         // Yahoo Finance API: no authentication required, unlimited free tier
         const std::string url =
@@ -187,6 +187,22 @@ namespace
         }
 
         return true;
+    }
+
+    bool fetchFromYahoo(const std::string& symbol,
+                        std::string& response_body,
+                        std::string& error)
+    {
+        // The local network is prone to transient DNS/connect timeouts; a single
+        // failed attempt otherwise leaves the ticker without price history until
+        // the next sync cycle (an hour or more), so retry once before giving up.
+        if (fetchFromYahooOnce(symbol, response_body, error))
+        {
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        return fetchFromYahooOnce(symbol, response_body, error);
     }
 
     bool parseDailyCloseSeriesFromYahoo(const std::string& json,
@@ -646,8 +662,14 @@ namespace MarketDataSync
                 }
             );
 
+            // No market data (yet) is not the same as worthless: until a close
+            // is available for a day, value the position at its cost basis so a
+            // failed Yahoo fetch can't silently zero the portfolio total.
+            const double fallback_price = stock.getAveragePurchasePrice();
+
             if (prices.empty())
             {
+                price_tracks[ticker] = PriceTrack{{}, 0, fallback_price};
                 continue;
             }
 
@@ -676,7 +698,7 @@ namespace MarketDataSync
                 timeline_days.insert(d);
             }
 
-            price_tracks[ticker] = PriceTrack{std::move(prices), 0, 0.0};
+            price_tracks[ticker] = PriceTrack{std::move(prices), 0, fallback_price};
         }
 
         // Clamp the timeline to the earliest transaction across the whole portfolio,
