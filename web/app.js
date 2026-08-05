@@ -3244,7 +3244,10 @@ function renderSpendDrilldownTable(transactions) {
         <td>${escapeHtml(merchant)}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td class="num">${currency(tx.amount)}</td>
-        <td><button class="ghost-btn drilldown-529-btn" type="button" data-key="${escapeHtml(tx.key)}">529</button></td>
+        <td>
+          <button class="ghost-btn drilldown-529-btn" type="button" data-key="${escapeHtml(tx.key)}">529</button>
+          <button class="ghost-btn drilldown-deduct-btn" type="button" data-key="${escapeHtml(tx.key)}">Deduct</button>
+        </td>
       </tr>`;
     })
     .join("");
@@ -3269,6 +3272,16 @@ function openSpendCategoryDrilldown(primary) {
         el.transactionsDialog.close();
         setSpendTab("529");
         openQualify529Dialog(tx);
+      }
+    });
+  });
+  el.transactionsHistory.querySelectorAll(".drilldown-deduct-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = (state.spend.transactions || []).find((t) => t.key === btn.dataset.key);
+      if (tx) {
+        el.transactionsDialog.close();
+        setSpendTab("tax");
+        openMarkDialog("deduction", tx);
       }
     });
   });
@@ -3687,9 +3700,116 @@ function wireTaxMarkedListEvents(host) {
   }
 }
 
-function renderTaxIncomeQueue(incomeTxByKey) { /* populated in Task 8 */ }
-function renderTaxDeposits(incomeTxByKey) { /* populated in Task 8 */ }
-function renderTaxExpenseBrowser(spendTxByKey) { /* populated in Task 8 */ }
+function renderTaxIncomeQueue(incomeTxByKey) {
+  const host = document.getElementById("taxIncomeQueueTable");
+  if (!host) return;
+  const queue = state.tax.incomeTxs
+    .filter((tx) =>
+      (tx.category || "").startsWith("INCOME_") &&
+      !state.tax.tags.income[tx.key])
+    .sort((a, b) => (b.date || 0) - (a.date || 0));
+  if (queue.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">Queue is clear — no unreviewed income deposits in ${escapeHtml(String(state.tax.year))}.</p>`;
+    return;
+  }
+  const rows = queue
+    .map((tx) => `<tr data-key="${escapeHtml(tx.key)}">
+      <td>${dateLabel(tx.date)}</td>
+      <td>${escapeHtml(tx.notes || "—")}</td>
+      <td>${escapeHtml(tx.account || "")}</td>
+      <td class="num">${currency(tx.amount)}</td>
+      <td>
+        <button class="ghost-btn tax-mark-income-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Mark taxable</button>
+        <button class="ghost-btn tax-dismiss-income-btn" type="button" data-key="${escapeHtml(tx.key)}">✕ Dismiss</button>
+      </td>
+    </tr>`)
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Source</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  host.querySelectorAll(".tax-mark-income-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = incomeTxByKey[btn.dataset.key];
+      if (tx) openMarkDialog("income", tx);
+    });
+  });
+  host.querySelectorAll(".tax-dismiss-income-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await saveTaxTag("income", btn.dataset.key, "dismissed", null);
+      } catch (e) {
+        showFlash(`Dismiss failed: ${e.message}`);
+      }
+    });
+  });
+}
+
+function renderTaxDeposits(incomeTxByKey) {
+  const host = document.getElementById("taxDepositsTable");
+  if (!host) return;
+  const needle = state.tax.depositsSearch.trim().toLowerCase();
+  const rows = state.tax.incomeTxs
+    .filter((tx) => !needle || (tx.notes || "").toLowerCase().includes(needle))
+    .sort((a, b) => (b.date || 0) - (a.date || 0))
+    .map((tx) => {
+      const tag = state.tax.tags.income[tx.key];
+      const marked = tag && tag.status === "qualified";
+      const action = marked
+        ? `<span class="muted-note">marked</span>`
+        : `<button class="ghost-btn tax-mark-income-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Mark taxable</button>`;
+      return `<tr>
+        <td>${dateLabel(tx.date)}</td>
+        <td>${escapeHtml(tx.notes || "—")}</td>
+        <td>${escapeHtml(tx.account || "")}</td>
+        <td class="num">${currency(tx.amount)}</td>
+        <td>${action}</td>
+      </tr>`;
+    })
+    .join("");
+  host.innerHTML = rows
+    ? `<table class="tx-table"><thead><tr><th>Date</th><th>Source</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p class="muted-note" style="padding:0.75rem;">No deposits match.</p>`;
+  host.querySelectorAll(".tax-mark-income-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = incomeTxByKey[btn.dataset.key];
+      if (tx) openMarkDialog("income", tx);
+    });
+  });
+}
+
+function renderTaxExpenseBrowser(spendTxByKey) {
+  const host = document.getElementById("taxExpensesTable");
+  if (!host) return;
+  const needle = state.tax.expensesSearch.trim().toLowerCase();
+  const rows = state.tax.spendTxs
+    .filter((tx) => !needle || (tx.notes || "").toLowerCase().includes(needle))
+    .sort((a, b) => (b.date || 0) - (a.date || 0))
+    .map((tx) => {
+      const tag = state.tax.tags.deductions[tx.key];
+      const marked = tag && tag.status === "qualified";
+      const action = marked
+        ? `<span class="muted-note">marked</span>`
+        : `<button class="ghost-btn tax-deduct-expense-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Deduct</button>`;
+      return `<tr>
+        <td>${dateLabel(tx.date)}</td>
+        <td>${escapeHtml(tx.notes || "—")}</td>
+        <td>${escapeHtml(tx.account || "")}</td>
+        <td class="num">${currency(tx.amount)}</td>
+        <td>${action}</td>
+      </tr>`;
+    })
+    .join("");
+  host.innerHTML = rows
+    ? `<table class="tx-table"><thead><tr><th>Date</th><th>Merchant</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<p class="muted-note" style="padding:0.75rem;">No expenses match.</p>`;
+  host.querySelectorAll(".tax-deduct-expense-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = spendTxByKey[btn.dataset.key];
+      if (tx) openMarkDialog("deduction", tx);
+    });
+  });
+}
 
 function render529Tab() {
   const { fromTs, toTs } = spendRangeBounds();
@@ -3880,19 +4000,36 @@ function render529Queue(txByKey) {
 }
 
 let qualify529Target = null;
+let markDialogMode = "529";
 
-function openQualify529Dialog(tx) {
+const MARK_DIALOG_COPY = {
+  "529": { title: "Qualify for 529", verb: "Qualify", showFiles: true },
+  "income": { title: "Mark taxable income", verb: "Mark", showFiles: false },
+  "deduction": { title: "Mark tax deductible", verb: "Mark", showFiles: true }
+};
+
+function openMarkDialog(mode, tx) {
+  markDialogMode = mode;
   qualify529Target = tx;
   const dialog = document.getElementById("qualify529Dialog");
+  const title = document.getElementById("qualify529Title");
   const merchant = document.getElementById("qualify529Merchant");
   const amount = document.getElementById("qualify529Amount");
   const files = document.getElementById("qualify529Files");
+  const filesWrap = document.getElementById("qualify529FilesWrap");
   if (!dialog || !amount) return;
+  const copy = MARK_DIALOG_COPY[mode];
+  if (title) title.textContent = copy.title;
   if (merchant) merchant.textContent = `${tx.notes || "—"} · ${dateLabel(tx.date)} · ${currency(tx.amount)}`;
   amount.value = tx.amount.toFixed(2);
   amount.max = tx.amount;
   if (files) files.value = "";
+  if (filesWrap) filesWrap.hidden = !copy.showFiles;
   dialog.showModal();
+}
+
+function openQualify529Dialog(tx) {
+  openMarkDialog("529", tx);
 }
 
 function wireQualify529Dialog() {
@@ -3910,31 +4047,52 @@ function wireQualify529Dialog() {
       const qualifiedAmount = Number.parseFloat(amountInput.value);
       if (!Number.isFinite(qualifiedAmount) || qualifiedAmount <= 0 ||
           qualifiedAmount > qualify529Target.amount + 0.005) {
-        showFlash("Qualified amount must be between $0.01 and the charge amount.");
-        return;
-      }
-      if (!isWithinAcademicYear(qualify529Target.date)) {
-        showFlash("Only academic-year expenses (Aug 15 – May 15) qualify for 529.");
+        showFlash("Amount must be between $0.01 and the transaction amount.");
         return;
       }
       save.disabled = true;
       try {
-        const files = filesInput ? Array.from(filesInput.files) : [];
-        if (files.length > 0) {
-          await saveTag529(qualify529Target.key, "qualified", qualifiedAmount, false);
-          try {
-            for (const file of files) {
-              await apiUploadReceipt(qualify529Target.key, file);
-            }
-          } finally {
-            await refresh529Tags();
+        const key = qualify529Target.key;
+        if (markDialogMode === "529") {
+          if (!isWithinAcademicYear(qualify529Target.date)) {
+            showFlash("Only academic-year expenses (Aug 15 – May 15) qualify for 529.");
+            return;
           }
+          const files = filesInput ? Array.from(filesInput.files) : [];
+          if (files.length > 0) {
+            await saveTag529(key, "qualified", qualifiedAmount, false);
+            try {
+              for (const file of files) {
+                await apiUploadReceipt(key, file);
+              }
+            } finally {
+              await refresh529Tags();
+            }
+          } else {
+            await saveTag529(key, "qualified", qualifiedAmount);
+          }
+          dialog.close();
+        } else if (markDialogMode === "income") {
+          await saveTaxTag("income", key, "qualified", qualifiedAmount);
+          dialog.close();
         } else {
-          await saveTag529(qualify529Target.key, "qualified", qualifiedAmount);
+          const files = filesInput ? Array.from(filesInput.files) : [];
+          if (files.length > 0) {
+            await saveTaxTag("deduction", key, "qualified", qualifiedAmount, false);
+            try {
+              for (const file of files) {
+                await apiUploadReceiptTo("/api/tax/receipt", key, file);
+              }
+            } finally {
+              await refreshTaxTags();
+            }
+          } else {
+            await saveTaxTag("deduction", key, "qualified", qualifiedAmount);
+          }
+          dialog.close();
         }
-        dialog.close();
       } catch (e) {
-        showFlash(`Qualify failed: ${e.message}`);
+        showFlash(`Save failed: ${e.message}`);
       } finally {
         save.disabled = false;
       }
@@ -3973,6 +4131,24 @@ function wireTaxStaticControls() {
       } finally {
         await refreshTaxTags();
       }
+    });
+  }
+  const depositsSearch = document.getElementById("taxDepositsSearch");
+  if (depositsSearch) {
+    depositsSearch.addEventListener("input", () => {
+      state.tax.depositsSearch = depositsSearch.value;
+      const incomeTxByKey = {};
+      state.tax.incomeTxs.forEach((tx) => { incomeTxByKey[tx.key] = tx; });
+      renderTaxDeposits(incomeTxByKey);
+    });
+  }
+  const expensesSearch = document.getElementById("taxExpensesSearch");
+  if (expensesSearch) {
+    expensesSearch.addEventListener("input", () => {
+      state.tax.expensesSearch = expensesSearch.value;
+      const spendTxByKey = {};
+      state.tax.spendTxs.forEach((tx) => { spendTxByKey[tx.key] = tx; });
+      renderTaxExpenseBrowser(spendTxByKey);
     });
   }
 }
