@@ -880,11 +880,11 @@ async function apiPost(path, body) {
   }
 }
 
-async function apiUploadReceipt(key, file) {
+async function apiUploadReceiptTo(basePath, key, file) {
   beginRequest();
   try {
     const query = `key=${encodeURIComponent(key)}&filename=${encodeURIComponent(file.name)}`;
-    const response = await fetch(apiUrl(`/api/529/receipt?${query}`), {
+    const response = await fetch(apiUrl(`${basePath}?${query}`), {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: file
@@ -903,6 +903,10 @@ async function apiUploadReceipt(key, file) {
   } finally {
     endRequest();
   }
+}
+
+async function apiUploadReceipt(key, file) {
+  return apiUploadReceiptTo("/api/529/receipt", key, file);
 }
 
 async function apiDelete(path) {
@@ -3348,7 +3352,7 @@ function setSpendTab(tab) {
   const taxBtn = document.getElementById("spendTabTax");
   if (taxPane) taxPane.hidden = tab !== "tax";
   if (taxBtn) taxBtn.classList.toggle("is-active", tab === "tax");
-  if (tab === "tax") renderTaxTab();
+  if (tab === "tax") loadTaxData();
 }
 
 const CANDIDATE_529_GENERAL = new Set([
@@ -3436,7 +3440,252 @@ async function saveTag529(key, status, qualifiedAmount, refresh = true) {
   if (refresh) await refresh529Tags();
 }
 
-function renderTaxTab() { /* populated in Task 7 */ }
+function taxYearBounds() {
+  const y = state.tax.year;
+  return { from: `${y}-01-01`, to: `${y}-12-31` };
+}
+
+async function loadTaxData() {
+  if (state.tax.loading) return;
+  state.tax.loading = true;
+  try {
+    const { from, to } = taxYearBounds();
+    const [spendPayload, incomePayload, tagsPayload] = await Promise.all([
+      apiGet(`/api/spend?from=${from}&to=${to}`),
+      apiGet(`/api/income?from=${from}&to=${to}`),
+      apiGet("/api/tax/tags")
+    ]);
+    state.tax.spendTxs = Array.isArray(spendPayload.transactions) ? spendPayload.transactions : [];
+    state.tax.incomeTxs = Array.isArray(incomePayload.transactions) ? incomePayload.transactions : [];
+    state.tax.tags = { income: {}, deductions: {} };
+    (Array.isArray(tagsPayload.income) ? tagsPayload.income : []).forEach((tag) => {
+      state.tax.tags.income[tag.key] = tag;
+    });
+    (Array.isArray(tagsPayload.deductions) ? tagsPayload.deductions : []).forEach((tag) => {
+      state.tax.tags.deductions[tag.key] = tag;
+    });
+    renderTaxTab();
+  } catch (e) {
+    showFlash(`Failed to load tax data: ${e.message}`);
+  } finally {
+    state.tax.loading = false;
+  }
+}
+
+async function refreshTaxTags() {
+  try {
+    const tagsPayload = await apiGet("/api/tax/tags");
+    state.tax.tags = { income: {}, deductions: {} };
+    (Array.isArray(tagsPayload.income) ? tagsPayload.income : []).forEach((tag) => {
+      state.tax.tags.income[tag.key] = tag;
+    });
+    (Array.isArray(tagsPayload.deductions) ? tagsPayload.deductions : []).forEach((tag) => {
+      state.tax.tags.deductions[tag.key] = tag;
+    });
+    renderTaxTab();
+  } catch (e) {
+    showFlash(`Failed to refresh tax tags: ${e.message}`);
+  }
+}
+
+async function saveTaxTag(kind, key, status, amount, refresh = true) {
+  const body = { kind, key, status };
+  if (status === "qualified" && amount != null) {
+    body.amount = amount;
+  }
+  await apiPost("/api/tax/tag", body);
+  if (refresh) await refreshTaxTags();
+}
+
+function taxYearRecordFilter(tagMap) {
+  const y = state.tax.year;
+  const fromTs = Math.floor(Date.UTC(y, 0, 1) / 1000);
+  const toTs = Math.floor(Date.UTC(y, 11, 31, 23, 59, 59) / 1000);
+  return Object.values(tagMap)
+    .filter((tag) => tag.status === "qualified" && tag.date >= fromTs && tag.date <= toTs)
+    .sort((a, b) => b.date - a.date);
+}
+
+function renderTaxTab() {
+  const markedIncome = taxYearRecordFilter(state.tax.tags.income);
+  const markedDeductions = taxYearRecordFilter(state.tax.tags.deductions);
+
+  const incomeTotal = markedIncome.reduce((sum, t) => sum + (t.qualified_amount || 0), 0);
+  const deductionTotal = markedDeductions.reduce((sum, t) => sum + (t.qualified_amount || 0), 0);
+  const missingReceipts = markedDeductions.filter((t) => (t.receipts || []).length === 0).length;
+
+  const incomeSummary = document.getElementById("taxSummaryIncome");
+  if (incomeSummary) {
+    incomeSummary.textContent = `Taxable income: ${currency(incomeTotal)} · ${markedIncome.length} marked`;
+  }
+  const deductionSummary = document.getElementById("taxSummaryDeductions");
+  if (deductionSummary) {
+    const missingNote = missingReceipts > 0
+      ? ` · ⚠ ${missingReceipts} missing receipt${missingReceipts === 1 ? "" : "s"}`
+      : "";
+    deductionSummary.textContent = `Deductible: ${currency(deductionTotal)} · ${markedDeductions.length} marked${missingNote}`;
+  }
+
+  const incomeTxByKey = {};
+  state.tax.incomeTxs.forEach((tx) => { incomeTxByKey[tx.key] = tx; });
+  const spendTxByKey = {};
+  state.tax.spendTxs.forEach((tx) => { spendTxByKey[tx.key] = tx; });
+
+  renderTaxIncomeQueue(incomeTxByKey);
+  renderTaxMarkedIncome(markedIncome, incomeTxByKey);
+  renderTaxDeposits(incomeTxByKey);
+  renderTaxMarkedDeductions(markedDeductions, spendTxByKey);
+  renderTaxExpenseBrowser(spendTxByKey);
+}
+
+function renderTaxMarkedIncome(marked, txByKey) {
+  const host = document.getElementById("taxMarkedIncomeTable");
+  if (!host) return;
+  if (marked.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">No income marked for ${state.tax.year} yet.</p>`;
+    return;
+  }
+  const rows = marked
+    .map((tag) => {
+      const orphaned = !txByKey[tag.key];
+      return `<tr data-key="${escapeHtml(tag.key)}">
+        <td>${dateLabel(tag.date)}</td>
+        <td>${escapeHtml(tag.notes || "—")}${orphaned ? ` <span class="orphaned-badge" title="No longer in income data">orphaned</span>` : ""}</td>
+        <td class="num">${currency(tag.amount)}</td>
+        <td class="num">
+          <input class="tax-amount-input num" type="number" step="0.01" min="0.01"
+                 max="${Number.isFinite(tag.amount) ? tag.amount : 0}" value="${(tag.qualified_amount || 0).toFixed(2)}"
+                 data-key="${escapeHtml(tag.key)}" data-kind="income" aria-label="Taxable amount" />
+        </td>
+        <td><button class="ghost-btn tax-unmark-btn" type="button" data-key="${escapeHtml(tag.key)}" data-kind="income">Unmark</button></td>
+      </tr>`;
+    })
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Source</th><th class="num">Deposit</th><th class="num">Taxable</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  wireTaxMarkedListEvents(host);
+}
+
+function renderTaxMarkedDeductions(marked, txByKey) {
+  const host = document.getElementById("taxMarkedDeductionsTable");
+  if (!host) return;
+  if (marked.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">No deductions marked for ${state.tax.year} yet.</p>`;
+    return;
+  }
+  const rows = marked
+    .map((tag) => {
+      const orphaned = !txByKey[tag.key];
+      const receipts = (tag.receipts || [])
+        .map((name) =>
+          `<a class="receipt-chip" target="_blank"
+              href="${escapeHtml(apiUrl(`/api/tax/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`))}"
+           >${escapeHtml(name)}</a>
+           <button class="tax-receipt-delete" type="button" data-key="${escapeHtml(tag.key)}"
+                   data-filename="${escapeHtml(name)}" title="Delete receipt">×</button>`)
+        .join(" ");
+      const receiptCell = receipts ||
+        `<span class="missing-receipt-badge">⚠ no receipt</span>`;
+      return `<tr data-key="${escapeHtml(tag.key)}">
+        <td>${dateLabel(tag.date)}</td>
+        <td>${escapeHtml(tag.notes || "—")}${orphaned ? ` <span class="orphaned-badge" title="No longer in spend data">orphaned</span>` : ""}</td>
+        <td class="num">${currency(tag.amount)}</td>
+        <td class="num">
+          <input class="tax-amount-input num" type="number" step="0.01" min="0.01"
+                 max="${Number.isFinite(tag.amount) ? tag.amount : 0}" value="${(tag.qualified_amount || 0).toFixed(2)}"
+                 data-key="${escapeHtml(tag.key)}" data-kind="deduction" aria-label="Deductible amount" />
+        </td>
+        <td class="receipt-cell">${receiptCell}
+          <button class="ghost-btn tax-receipt-upload-btn" type="button" data-key="${escapeHtml(tag.key)}">＋ Receipt</button>
+        </td>
+        <td><button class="ghost-btn tax-unmark-btn" type="button" data-key="${escapeHtml(tag.key)}" data-kind="deduction">Unmark</button></td>
+      </tr>`;
+    })
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Merchant</th><th class="num">Charge</th><th class="num">Deductible</th><th>Receipts</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  wireTaxMarkedListEvents(host);
+}
+
+function wireTaxMarkedListEvents(host) {
+  host.querySelectorAll(".tax-amount-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const kind = input.dataset.kind;
+      const tagMap = kind === "income" ? state.tax.tags.income : state.tax.tags.deductions;
+      const tag = tagMap[input.dataset.key];
+      if (!tag) return;
+      const value = Number.parseFloat(input.value);
+      if (!Number.isFinite(value) || value <= 0 || value > tag.amount + 0.005) {
+        showFlash("Amount must be between $0.01 and the transaction amount.");
+        input.value = (tag.qualified_amount || 0).toFixed(2);
+        return;
+      }
+      try {
+        await saveTaxTag(kind, input.dataset.key, "qualified", value);
+      } catch (e) {
+        showFlash(`Update failed: ${e.message}`);
+      }
+    });
+  });
+  host.querySelectorAll(".tax-unmark-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await saveTaxTag(btn.dataset.kind, btn.dataset.key, "none", null);
+      } catch (e) {
+        showFlash(`Unmark failed: ${e.message}`);
+      }
+    });
+  });
+  host.querySelectorAll(".tax-receipt-upload-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const fileInput = document.getElementById("receiptTaxFileInput");
+      if (!fileInput) return;
+      fileInput.dataset.key = btn.dataset.key;
+      fileInput.value = "";
+      fileInput.click();
+    });
+  });
+  host.querySelectorAll(".tax-receipt-delete").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiDelete(`/api/tax/receipt?key=${encodeURIComponent(btn.dataset.key)}&filename=${encodeURIComponent(btn.dataset.filename)}`);
+        await refreshTaxTags();
+      } catch (e) {
+        showFlash(`Delete failed: ${e.message}`);
+      }
+    });
+  });
+  host.querySelectorAll("tr[data-key]").forEach((row) => {
+    row.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      row.classList.add("receipt-drop-active");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("receipt-drop-active"));
+    row.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      row.classList.remove("receipt-drop-active");
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (files.length === 0) return;
+      try {
+        for (const file of files) {
+          await apiUploadReceiptTo("/api/tax/receipt", row.dataset.key, file);
+        }
+      } catch (e) {
+        showFlash(`Upload failed: ${e.message}`);
+      } finally {
+        await refreshTaxTags();
+      }
+    });
+  });
+}
+
+function renderTaxIncomeQueue(incomeTxByKey) { /* populated in Task 8 */ }
+function renderTaxDeposits(incomeTxByKey) { /* populated in Task 8 */ }
+function renderTaxExpenseBrowser(spendTxByKey) { /* populated in Task 8 */ }
 
 function render529Tab() {
   const { fromTs, toTs } = spendRangeBounds();
@@ -3684,6 +3933,41 @@ function wireQualify529Dialog() {
         showFlash(`Qualify failed: ${e.message}`);
       } finally {
         save.disabled = false;
+      }
+    });
+  }
+}
+
+function wireTaxStaticControls() {
+  const yearSelect = document.getElementById("taxYearSelect");
+  if (yearSelect) {
+    const current = new Date().getFullYear();
+    for (let y = current; y >= current - 3; y--) {
+      const opt = document.createElement("option");
+      opt.value = String(y);
+      opt.textContent = String(y);
+      yearSelect.appendChild(opt);
+    }
+    yearSelect.value = String(state.tax.year);
+    yearSelect.addEventListener("change", () => {
+      state.tax.year = Number.parseInt(yearSelect.value, 10);
+      loadTaxData();
+    });
+  }
+  const receiptInput = document.getElementById("receiptTaxFileInput");
+  if (receiptInput) {
+    receiptInput.addEventListener("change", async () => {
+      const key = receiptInput.dataset.key;
+      const files = Array.from(receiptInput.files);
+      if (!key || files.length === 0) return;
+      try {
+        for (const file of files) {
+          await apiUploadReceiptTo("/api/tax/receipt", key, file);
+        }
+      } catch (e) {
+        showFlash(`Upload failed: ${e.message}`);
+      } finally {
+        await refreshTaxTags();
       }
     });
   }
@@ -4169,6 +4453,7 @@ function wireEvents() {
   const spendTabTax = document.getElementById("spendTabTax");
   if (spendTabTax) spendTabTax.addEventListener("click", () => setSpendTab("tax"));
   wireQualify529Dialog();
+  wireTaxStaticControls();
   const exportCsvBtn = document.getElementById("export529CsvBtn");
   const exportZipBtn = document.getElementById("export529ZipBtn");
   if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => download529Export("csv"));
