@@ -1230,3 +1230,34 @@ small {
   color: var(--bg);
   border-color: var(--ink);
 }
+
+.receipt-chip {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(34, 34, 34, 0.08);
+  font-size: 0.8rem;
+  text-decoration: none;
+}
+
+.receipt-delete {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.missing-receipt-badge,
+.orphaned-badge {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(214, 69, 65, 0.12);
+  color: #b3372f;
+}
+
+.qualified-amount-input {
+  width: 6.5rem;
+  font: inherit;
+  text-align: right;
+}

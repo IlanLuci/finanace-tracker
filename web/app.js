@@ -3270,9 +3270,17 @@ async function loadSpendData() {
   state.spend.loading = true;
   try {
     const { from, to } = rangeToDates(state.spend.range);
-    const payload = await apiGet(`/api/spend?from=${from}&to=${to}`);
+    const [payload, tagsPayload] = await Promise.all([
+      apiGet(`/api/spend?from=${from}&to=${to}`),
+      apiGet("/api/529/tags")
+    ]);
     state.spend.transactions = Array.isArray(payload.transactions) ? payload.transactions : [];
+    state.spend.tags529 = {};
+    (Array.isArray(tagsPayload.tags) ? tagsPayload.tags : []).forEach((tag) => {
+      state.spend.tags529[tag.key] = tag;
+    });
     renderSpendAnalysis();
+    if (state.spend.tab === "529") render529Tab();
   } catch (e) {
     showFlash(`Failed to load spend: ${e.message}`);
   } finally {
@@ -3293,8 +3301,125 @@ function setSpendTab(tab) {
   if (tab === "529") render529Tab();
 }
 
+const CANDIDATE_529_GENERAL = new Set([
+  "GENERAL_MERCHANDISE_OFFICE_SUPPLIES",
+  "GENERAL_MERCHANDISE_BOOKSTORES_AND_NEWSSTANDS",
+  "GENERAL_MERCHANDISE_SUPERSTORES",
+  "GENERAL_MERCHANDISE_DEPARTMENT_STORES",
+  "GENERAL_MERCHANDISE_DISCOUNT_STORES",
+  "GENERAL_MERCHANDISE_OTHER_GENERAL_MERCHANDISE"
+]);
+
+function isCandidate529Category(category) {
+  if (!category) return false;
+  if (category === "FOOD_AND_DRINK_BEER_WINE_AND_LIQUOR") return false;
+  if (category.startsWith("FOOD_AND_DRINK")) return true;
+  return CANDIDATE_529_GENERAL.has(category);
+}
+
+function spendRangeBounds() {
+  // Same range the /api/spend request used, as unix seconds for filtering
+  // denormalized tag dates. "to" is bumped to end-of-day like the backend.
+  const { from, to } = rangeToDates(state.spend.range);
+  return {
+    fromTs: Math.floor(new Date(`${from}T00:00:00Z`).getTime() / 1000),
+    toTs: Math.floor(new Date(`${to}T00:00:00Z`).getTime() / 1000) + 86399
+  };
+}
+
+async function refresh529Tags() {
+  const tagsPayload = await apiGet("/api/529/tags");
+  state.spend.tags529 = {};
+  (Array.isArray(tagsPayload.tags) ? tagsPayload.tags : []).forEach((tag) => {
+    state.spend.tags529[tag.key] = tag;
+  });
+  render529Tab();
+}
+
+async function saveTag529(key, status, qualifiedAmount) {
+  const body = { key, status };
+  if (status === "qualified" && qualifiedAmount != null) {
+    body.qualified_amount = qualifiedAmount;
+  }
+  await apiPost("/api/529/tag", body);
+  await refresh529Tags();
+}
+
 function render529Tab() {
-  // populated in Task 8
+  const { fromTs, toTs } = spendRangeBounds();
+  const txByKey = {};
+  (state.spend.transactions || []).forEach((tx) => { txByKey[tx.key] = tx; });
+
+  const qualified = Object.values(state.spend.tags529)
+    .filter((tag) => tag.status === "qualified" && tag.date >= fromTs && tag.date <= toTs)
+    .sort((a, b) => b.date - a.date);
+
+  const total = qualified.reduce((sum, tag) => sum + (tag.qualified_amount || 0), 0);
+  const missingReceipts = qualified.filter((tag) => (tag.receipts || []).length === 0).length;
+
+  const totalLabel = document.getElementById("total529Label");
+  if (totalLabel) totalLabel.textContent = `529 qualified total: ${currency(total)}`;
+  const meta = document.getElementById("summary529Meta");
+  if (meta) {
+    const missingNote = missingReceipts > 0
+      ? ` · ⚠ ${missingReceipts} missing receipt${missingReceipts === 1 ? "" : "s"}`
+      : "";
+    meta.textContent = `${qualified.length} qualified charge${qualified.length === 1 ? "" : "s"} in range${missingNote}`;
+  }
+
+  render529Queue(txByKey);           // Task 9
+  render529QualifiedList(qualified, txByKey); // below
+}
+
+function render529QualifiedList(qualified, txByKey) {
+  const host = document.getElementById("qualified529Table");
+  if (!host) return;
+  if (qualified.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem 0;">Nothing qualified in this range yet.</p>`;
+    return;
+  }
+  const rows = qualified
+    .map((tag) => {
+      const orphaned = !txByKey[tag.key];
+      const receipts = (tag.receipts || [])
+        .map((name) =>
+          `<a class="receipt-chip" target="_blank"
+              href="${apiUrl(`/api/529/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`)}"
+           >${escapeHtml(name)}</a>
+           <button class="receipt-delete" type="button" data-key="${escapeHtml(tag.key)}"
+                   data-filename="${escapeHtml(name)}" title="Delete receipt">×</button>`)
+        .join(" ");
+      const receiptCell = receipts ||
+        `<span class="missing-receipt-badge">⚠ no receipt</span>`;
+      return `<tr data-key="${escapeHtml(tag.key)}">
+        <td>${dateLabel(tag.date)}</td>
+        <td>${escapeHtml(tag.notes || "—")}${orphaned ? ` <span class="orphaned-badge" title="No longer in spend data">orphaned</span>` : ""}</td>
+        <td class="num">${currency(tag.amount)}</td>
+        <td class="num">
+          <input class="qualified-amount-input num" type="number" step="0.01" min="0.01"
+                 max="${tag.amount}" value="${(tag.qualified_amount || 0).toFixed(2)}"
+                 data-key="${escapeHtml(tag.key)}" aria-label="Qualified amount" />
+        </td>
+        <td class="receipt-cell">${receiptCell}
+          <button class="ghost-btn receipt-upload-btn" type="button" data-key="${escapeHtml(tag.key)}">＋ Receipt</button>
+        </td>
+        <td><button class="ghost-btn untag-529-btn" type="button" data-key="${escapeHtml(tag.key)}">Untag</button></td>
+      </tr>`;
+    })
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Merchant</th><th class="num">Charge</th><th class="num">Qualified</th><th>Receipts</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  wire529QualifiedListEvents(host); // Task 9/10 attach handlers; define an empty stub now
+}
+
+function wire529QualifiedListEvents(host) {
+  // handlers attached in Tasks 9 and 10
+}
+
+function render529Queue(txByKey) {
+  // implemented in Task 9
 }
 
 function showSpendAnalysis() {
