@@ -5,6 +5,8 @@ recompute_daily_values
 
 data/
 
+backups/
+
 test_persistence
 test_529
 .env

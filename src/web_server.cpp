@@ -3653,6 +3653,66 @@ namespace
         return makeJsonResponse(201, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
     }
 
+    // Daily tar snapshot of data/ (tags, receipts, tax records, portfolios).
+    // Runs in a detached thread: once at startup, then once per wall-clock day.
+    // Never throws into the server; failures only log to stderr (pm2 logs).
+    void runDataBackup()
+    {
+        std::error_code ec;
+        std::filesystem::create_directories("backups", ec);
+        if (ec)
+        {
+            std::cerr << "Backup: failed to create backups/ directory" << std::endl;
+            return;
+        }
+
+        const time_t now = std::time(nullptr);
+        std::tm tm_utc{};
+        gmtime_r(&now, &tm_utc);
+        char date_buf[16];
+        std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
+        const std::string snapshot = std::string("backups/data-") + date_buf + ".tar.gz";
+        if (std::filesystem::exists(snapshot))
+        {
+            return; // today's snapshot already taken (restart-safe)
+        }
+
+        const std::string temp_snapshot = snapshot + ".tmp";
+        const std::string cmd = "/usr/bin/tar -czf '" + temp_snapshot + "' data 2>/dev/null";
+        if (std::system(cmd.c_str()) != 0)
+        {
+            std::cerr << "Backup: tar failed for " << snapshot << std::endl;
+            std::filesystem::remove(temp_snapshot, ec);
+            return;
+        }
+        std::filesystem::rename(temp_snapshot, snapshot, ec);
+        if (ec)
+        {
+            std::cerr << "Backup: failed to finalize " << snapshot << std::endl;
+            return;
+        }
+        std::cout << "Backup: wrote " << snapshot << std::endl;
+
+        // Prune to the newest 14 snapshots (names sort chronologically).
+        std::vector<std::string> snapshots;
+        for (const auto& entry : std::filesystem::directory_iterator("backups", ec))
+        {
+            const std::string filename = entry.path().filename().string();
+            if (filename.rfind("data-", 0) == 0 && filename.size() > 7 &&
+                filename.substr(filename.size() - 7) == ".tar.gz")
+            {
+                snapshots.push_back(filename);
+            }
+        }
+        std::sort(snapshots.begin(), snapshots.end());
+        while (snapshots.size() > 14)
+        {
+            std::filesystem::remove(std::filesystem::path("backups") / snapshots.front(), ec);
+            std::cout << "Backup: pruned " << snapshots.front() << std::endl;
+            snapshots.erase(snapshots.begin());
+        }
+    }
+
     HttpResponse applyTagUpsert(const std::string& key, const std::string& status,
                                 std::optional<double> amount_opt,
                                 const char* tags_file, std::mutex& store_mutex,
@@ -6227,6 +6287,26 @@ bool PortfolioApiServer::start()
                     }
                 }
 
+                std::this_thread::sleep_for(std::chrono::seconds(DAILY_SYNC_POLL_SECONDS));
+            }
+        }
+    ).detach();
+
+    // Nightly data/ snapshot with 14-day retention. Wall-clock polled for the
+    // same suspend-safety reasons as the daily sync thread above.
+    std::thread(
+        []()
+        {
+            long long last_backup_day = -1;
+            while (true)
+            {
+                const time_t now = std::time(nullptr);
+                const long long current_day = static_cast<long long>(now / 86400);
+                if (current_day != last_backup_day)
+                {
+                    runDataBackup();
+                    last_backup_day = current_day;
+                }
                 std::this_thread::sleep_for(std::chrono::seconds(DAILY_SYNC_POLL_SECONDS));
             }
         }
