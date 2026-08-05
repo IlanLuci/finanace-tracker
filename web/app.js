@@ -3713,7 +3713,7 @@ function renderTaxIncomeQueue(incomeTxByKey) {
     return;
   }
   const rows = queue
-    .map((tx) => `<tr data-key="${escapeHtml(tx.key)}">
+    .map((tx) => `<tr>
       <td>${dateLabel(tx.date)}</td>
       <td>${escapeHtml(tx.notes || "—")}</td>
       <td>${escapeHtml(tx.account || "")}</td>
@@ -4092,7 +4092,7 @@ function wireQualify529Dialog() {
           dialog.close();
         }
       } catch (e) {
-        showFlash(`Save failed: ${e.message}`);
+        showFlash(`${MARK_DIALOG_COPY[markDialogMode].verb} failed: ${e.message}`);
       } finally {
         save.disabled = false;
       }
