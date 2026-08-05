@@ -1219,7 +1219,7 @@ small {
 .spend-tab {
   padding: 0.45rem 1rem;
   border: 1px solid rgba(34, 34, 34, 0.15);
-  border-radius: 999px;
+  border-radius: 0;
   background: transparent;
   font: inherit;
   cursor: pointer;
@@ -1234,7 +1234,7 @@ small {
 .receipt-chip {
   display: inline-block;
   padding: 0.15rem 0.5rem;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(34, 34, 34, 0.08);
   font-size: 0.8rem;
   text-decoration: none;
@@ -1251,7 +1251,7 @@ small {
 .orphaned-badge {
   font-size: 0.75rem;
   padding: 0.1rem 0.45rem;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(214, 69, 65, 0.12);
   color: #b3372f;
 }
