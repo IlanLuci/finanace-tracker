@@ -4770,6 +4770,13 @@ namespace
             return handleReceiptRoute(request, kTagsFile, kReceiptsDir, g_529_mutex);
         }
 
+        if (request.path == "/api/tax/receipt")
+        {
+            // Deduction receipts only: the store handed to the helper is the
+            // deductions file, so income marks can never accept uploads.
+            return handleReceiptRoute(request, kTaxDeductionTagsFile, kTaxReceiptsDir, g_tax_mutex);
+        }
+
         if (request.method == "GET" && request.path == "/api/529/export.csv")
         {
             const auto query_values = parseQuery(request.query);
