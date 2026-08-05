@@ -2755,6 +2755,12 @@ namespace
 
             if (parsed_headers)
             {
+                // Reject oversized requests early once we know Content-Length.
+                // 26 MB gives headroom above the 25 MB receipt-upload body cap.
+                if (content_length > 26ULL * 1024 * 1024)
+                {
+                    return std::nullopt;
+                }
                 const size_t header_end = data.find("\r\n\r\n");
                 if (header_end == std::string::npos)
                 {
@@ -2767,7 +2773,8 @@ namespace
                 }
             }
 
-            if (data.size() > 2 * 1024 * 1024)
+            // Safety cap: receipts up to 25 MB plus headers — raise to 26 MB.
+            if (data.size() > 26ULL * 1024 * 1024)
             {
                 return std::nullopt;
             }
@@ -3402,11 +3409,18 @@ namespace
 
     std::string csvField(const std::string& value)
     {
-        if (value.find_first_of(",\"\n\r") == std::string::npos)
+        // Prefix formula-injection characters so Excel/Sheets don't execute
+        // merchant-controlled cell content as formulas.
+        const bool inject_guard =
+            !value.empty() &&
+            (value[0] == '=' || value[0] == '+' || value[0] == '-' || value[0] == '@');
+
+        if (!inject_guard && value.find_first_of(",\"\n\r") == std::string::npos)
         {
             return value;
         }
         std::string escaped = "\"";
+        if (inject_guard) escaped += '\'';
         for (char c : value)
         {
             if (c == '"') escaped += "\"\"";
@@ -4714,10 +4728,27 @@ namespace
                         if (safe_receipt.empty()) continue;
                         const std::filesystem::path src =
                             std::filesystem::path(kReceiptsDir) / tag.key / safe_receipt;
-                        const std::filesystem::path dst =
-                            staging / (std::string(date_buf) + "_" + merchant + "_" + safe_receipt);
+
+                        // Dedupe staging names: same-day same-merchant files
+                        // with the same filename would otherwise collide and
+                        // one copy would silently vanish from the ZIP.
+                        const std::string base_name =
+                            std::string(date_buf) + "_" + merchant + "_" + safe_receipt;
+                        const size_t dot_pos = base_name.find_last_of('.');
+                        const std::string base_stem =
+                            (dot_pos != std::string::npos) ? base_name.substr(0, dot_pos) : base_name;
+                        const std::string base_ext =
+                            (dot_pos != std::string::npos) ? base_name.substr(dot_pos) : "";
+                        std::string deduped_name = base_name;
+                        int dedup_suffix = 2;
+                        while (std::filesystem::exists(staging / deduped_name))
+                        {
+                            deduped_name = base_stem + "-" + std::to_string(dedup_suffix++) + base_ext;
+                        }
+
+                        const std::filesystem::path dst = staging / deduped_name;
                         std::filesystem::copy_file(src, dst,
-                            std::filesystem::copy_options::overwrite_existing, ec);
+                            std::filesystem::copy_options::none, ec);
                         // Missing files are skipped: the CSV still lists the name.
                     }
                 }

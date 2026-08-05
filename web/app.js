@@ -3461,7 +3461,7 @@ function render529QualifiedList(qualified, txByKey) {
       const receipts = (tag.receipts || [])
         .map((name) =>
           `<a class="receipt-chip" target="_blank"
-              href="${apiUrl(`/api/529/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`)}"
+              href="${escapeHtml(apiUrl(`/api/529/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`))}"
            >${escapeHtml(name)}</a>
            <button class="receipt-delete" type="button" data-key="${escapeHtml(tag.key)}"
                    data-filename="${escapeHtml(name)}" title="Delete receipt">×</button>`)
