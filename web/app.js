@@ -3444,6 +3444,32 @@ async function download529Export(kind) {
   }
 }
 
+async function downloadTaxExport(kind) {
+  const year = state.tax.year;
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(`/api/tax/export/${kind}.csv?year=${year}`));
+    if (!response.ok) {
+      let message = `Export failed: ${response.status}`;
+      try {
+        message = (await response.json()).error || message;
+      } catch (_) { /* non-JSON error body */ }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tax-${kind}_${year}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showFlash(e.message);
+  } finally {
+    endRequest();
+  }
+}
+
 async function saveTag529(key, status, qualifiedAmount, refresh = true) {
   const body = { key, status };
   if (status === "qualified" && qualifiedAmount != null) {
@@ -4638,6 +4664,10 @@ function wireEvents() {
   const exportZipBtn = document.getElementById("export529ZipBtn");
   if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => download529Export("csv"));
   if (exportZipBtn) exportZipBtn.addEventListener("click", () => download529Export("zip"));
+  const exportTaxIncomeBtn = document.getElementById("exportTaxIncomeBtn");
+  const exportTaxDeductionsBtn = document.getElementById("exportTaxDeductionsBtn");
+  if (exportTaxIncomeBtn) exportTaxIncomeBtn.addEventListener("click", () => downloadTaxExport("income"));
+  if (exportTaxDeductionsBtn) exportTaxDeductionsBtn.addEventListener("click", () => downloadTaxExport("deductions"));
   const receiptInput = document.getElementById("receipt529FileInput");
   if (receiptInput) {
     receiptInput.addEventListener("change", async () => {
