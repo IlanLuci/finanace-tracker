@@ -3376,6 +3376,32 @@ async function refresh529Tags() {
   }
 }
 
+async function download529Export(kind) {
+  const { from, to } = rangeToDates(state.spend.range);
+  beginRequest();
+  try {
+    const response = await fetch(apiUrl(`/api/529/export.${kind}?from=${from}&to=${to}`));
+    if (!response.ok) {
+      let message = `Export failed: ${response.status}`;
+      try {
+        message = (await response.json()).error || message;
+      } catch (_) { /* non-JSON error body */ }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `529-expenses_${from}_to_${to}.${kind}`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showFlash(e.message);
+  } finally {
+    endRequest();
+  }
+}
+
 async function saveTag529(key, status, qualifiedAmount, refresh = true) {
   const body = { key, status };
   if (status === "qualified" && qualifiedAmount != null) {
@@ -4109,6 +4135,10 @@ function wireEvents() {
   if (spendTabAnalysis) spendTabAnalysis.addEventListener("click", () => setSpendTab("analysis"));
   if (spendTab529) spendTab529.addEventListener("click", () => setSpendTab("529"));
   wireQualify529Dialog();
+  const exportCsvBtn = document.getElementById("export529CsvBtn");
+  const exportZipBtn = document.getElementById("export529ZipBtn");
+  if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => download529Export("csv"));
+  if (exportZipBtn) exportZipBtn.addEventListener("click", () => download529Export("zip"));
   const receiptInput = document.getElementById("receipt529FileInput");
   if (receiptInput) {
     receiptInput.addEventListener("change", async () => {
