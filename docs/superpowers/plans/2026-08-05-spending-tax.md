@@ -131,17 +131,61 @@ Place after `buildSpendJson` (~line 3360):
 
 Note: unlike spend, no `spend_overrides` category rewriting and no TRANSFER_IN/LOAN category exclusion — every non-pending, non-own-transfer deposit is a candidate (peer-transfer income must be markable).
 
-- [ ] **Step 2: Add the route**
+- [ ] **Step 2: Extract shared range parsing and add the route**
 
-Directly after the `/api/spend` route's closing brace (~line 4312), duplicate its exact from/to parsing block (copy the ~35 lines: `parseQuery`, `parseIsoDateUTC` with the same 400 error strings, end-of-day bump, defaults), ending with:
+The from/to parsing block currently appears verbatim in `/api/spend`, `/api/529/export.csv`, and `/api/529/export.zip` (a deferred-minor from the 529 review). Extract it once into the anonymous namespace (near `parseQuery` usage helpers):
+
+```cpp
+    // Parses optional from/to (YYYY-MM-DD) query params with the /api/spend
+    // defaults: from = 365 days ago, to = now; "to" bumped to end-of-day.
+    // Returns a 400 response on malformed values, else nullopt.
+    std::optional<HttpResponse> parseRangeParams(const std::map<std::string, std::string>& query_values,
+                                                 time_t& from, time_t& to)
+    {
+        const time_t now = std::time(nullptr);
+        from = now - (365LL * 86400);
+        to = now;
+        auto from_it = query_values.find("from");
+        if (from_it != query_values.end() && !from_it->second.empty())
+        {
+            from = parseIsoDateUTC(from_it->second);
+            if (from == 0)
+            {
+                return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
+            }
+        }
+        auto to_it = query_values.find("to");
+        if (to_it != query_values.end() && !to_it->second.empty())
+        {
+            to = parseIsoDateUTC(to_it->second);
+            if (to == 0)
+            {
+                return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
+            }
+            to += 86399; // end-of-day inclusive
+        }
+        return std::nullopt;
+    }
+```
+
+Rewrite the `/api/spend`, `/api/529/export.csv`, and `/api/529/export.zip` routes' parsing to use it (behavior identical — same defaults, same error strings), then add the new route after `/api/spend`:
 
 ```cpp
         if (request.method == "GET" && request.path == "/api/income")
         {
-            // ... from/to parsing copied verbatim from /api/spend ...
+            const auto query_values = parseQuery(request.query);
+            time_t from = 0;
+            time_t to = 0;
+            auto range_error = parseRangeParams(query_values, from, to);
+            if (range_error.has_value())
+            {
+                return range_error.value();
+            }
             return makeJsonResponse(200, buildIncomeJson(manager, from, to));
         }
 ```
+
+After the rewrite, curl-verify the three refactored routes still behave: `/api/spend` with no params (365-day default), with a bad date (400 "from must be YYYY-MM-DD"), and `/api/529/export.csv?from=2026-01-01&to=2026-08-05` (200).
 
 - [ ] **Step 3: Build, deploy, verify**
 
