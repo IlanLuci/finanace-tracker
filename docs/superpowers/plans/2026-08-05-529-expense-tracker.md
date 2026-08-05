@@ -263,7 +263,7 @@ namespace ExpenseTags
                               const std::string& notes, int occurrence)
     {
         // FNV-1a 64-bit over the composite tuple.
-        unsigned long long hash = 1469598103934665603ULL;
+        unsigned long long hash = 14695981039346656037ULL;
         for (unsigned char c : keyBase(account, date, amount, notes))
         {
             hash ^= c;
