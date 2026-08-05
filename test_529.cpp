@@ -116,6 +116,30 @@ int main()
               "dismissed record round-trips with no receipts");
     }
 
+    // --- floating-point precision ---
+    ExpenseTags::TagRecord r3;
+    r3.key = "ghi789-0";
+    r3.status = "qualified";
+    r3.qualified_amount = 98765.43;
+    r3.account = "Capital One Balance";
+    r3.date = 1722200000;
+    r3.amount = 123456.78;
+    r3.notes = "Tuition payment";
+    r3.category = "GENERAL_SERVICES_EDUCATION";
+    r3.created = 1722500002;
+
+    check(ExpenseTags::saveTags(tags_path, {r3}), "saveTags succeeds for high-precision amounts");
+    std::vector<ExpenseTags::TagRecord> precise;
+    check(ExpenseTags::loadTags(tags_path, precise) && precise.size() == 1,
+          "loadTags returns high-precision record");
+    if (precise.size() == 1)
+    {
+        check(std::abs(precise[0].amount - 123456.78) < 1e-6,
+              "large amount round-trips exactly");
+        check(std::abs(precise[0].qualified_amount - 98765.43) < 1e-6,
+              "large qualified_amount round-trips exactly");
+    }
+
     {
         std::ofstream corrupt(tags_path);
         corrupt << "{not json";

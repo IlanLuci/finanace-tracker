@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 namespace
@@ -191,6 +192,7 @@ namespace ExpenseTags
                   const std::vector<TagRecord>& tags)
     {
         std::ostringstream out;
+        out << std::setprecision(15);
         out << "[";
         for (size_t i = 0; i < tags.size(); ++i)
         {
@@ -220,11 +222,24 @@ namespace ExpenseTags
         const std::string temp_path = file_path + ".tmp";
         {
             std::ofstream file(temp_path, std::ios::trunc);
-            if (!file.is_open()) return false;
+            if (!file.is_open())
+            {
+                std::remove(temp_path.c_str());
+                return false;
+            }
             file << out.str();
-            if (!file.good()) return false;
+            if (!file.good())
+            {
+                std::remove(temp_path.c_str());
+                return false;
+            }
         }
-        return std::rename(temp_path.c_str(), file_path.c_str()) == 0;
+        if (std::rename(temp_path.c_str(), file_path.c_str()) != 0)
+        {
+            std::remove(temp_path.c_str());
+            return false;
+        }
+        return true;
     }
 
     bool loadTags(const std::string& file_path,
