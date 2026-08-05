@@ -301,6 +301,7 @@ const state = {
     depositsSearch: "",
     expensesSearch: ""
   },
+  spend529: { year: new Date().getFullYear(), withdrawals: [] },
   stocksSort: { key: null, dir: null },
   allTransactions: {},
   monthlyShowAll: false,
@@ -3343,6 +3344,7 @@ async function loadSpendData() {
     });
     renderSpendAnalysis();
     if (state.spend.tab === "529") render529Tab();
+    render529Reconciliation();
   } catch (e) {
     showFlash(`Failed to load spend: ${e.message}`);
   } finally {
@@ -3360,7 +3362,7 @@ function setSpendTab(tab) {
   if (pane529) pane529.hidden = tab !== "529";
   if (analysisBtn) analysisBtn.classList.toggle("is-active", tab === "analysis");
   if (btn529) btn529.classList.toggle("is-active", tab === "529");
-  if (tab === "529") render529Tab();
+  if (tab === "529") { render529Tab(); loadWithdrawals529(); }
   const taxPane = document.getElementById("spendTaxPane");
   const taxBtn = document.getElementById("spendTabTax");
   if (taxPane) taxPane.hidden = tab !== "tax";
@@ -3413,9 +3415,72 @@ async function refresh529Tags() {
       state.spend.tags529[tag.key] = tag;
     });
     render529Tab();
+    render529Reconciliation();
   } catch (e) {
     showFlash(`Failed to refresh 529 tags: ${e.message}`);
   }
+}
+
+async function loadWithdrawals529() {
+  try {
+    const payload = await apiGet("/api/529/withdrawals");
+    state.spend529.withdrawals = Array.isArray(payload.withdrawals) ? payload.withdrawals : [];
+    render529Reconciliation();
+  } catch (e) {
+    showFlash(`Failed to load 529 withdrawals: ${e.message}`);
+  }
+}
+
+function render529Reconciliation() {
+  const y = state.spend529.year;
+  const fromTs = Math.floor(Date.UTC(y, 0, 1) / 1000);
+  const toTs = Math.floor(Date.UTC(y, 11, 31, 23, 59, 59) / 1000);
+  const inYear = (r) => r.date >= fromTs && r.date <= toTs;
+
+  const qualified = Object.values(state.spend.tags529)
+    .filter((t) => t.status === "qualified" && inYear(t))
+    .reduce((sum, t) => sum + (t.qualified_amount || 0), 0);
+  const yearWithdrawals = state.spend529.withdrawals.filter(inYear);
+  const withdrawn = yearWithdrawals.reduce((sum, w) => sum + (w.amount || 0), 0);
+  const headroom = qualified - withdrawn;
+
+  const line = document.getElementById("summary529Reconciliation");
+  if (line) {
+    line.innerHTML = `${escapeHtml(String(y))}: qualified ${escapeHtml(currency(qualified))} · withdrawn ${escapeHtml(currency(withdrawn))} · headroom <span class="${headroom < 0 ? "negative" : ""}">${escapeHtml(currency(headroom))}</span>`;
+  }
+
+  const host = document.getElementById("withdrawals529Table");
+  if (!host) return;
+  if (yearWithdrawals.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">No withdrawals recorded for ${escapeHtml(String(y))}.</p>`;
+    return;
+  }
+  const rows = yearWithdrawals
+    .sort((a, b) => b.date - a.date)
+    .map((w) => `<tr>
+      <td>${dateLabel(w.date)}</td>
+      <td>${escapeHtml(w.notes || "—")}</td>
+      <td class="num">${currency(w.amount)}</td>
+      <td><button class="ghost-btn withdrawal-remove-btn" type="button" data-key="${escapeHtml(w.key)}">Remove</button></td>
+    </tr>`)
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  host.querySelectorAll(".withdrawal-remove-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await apiPost("/api/529/withdrawal", { key: btn.dataset.key, status: "none" });
+        await loadWithdrawals529();
+      } catch (e) {
+        showFlash(`Remove failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 async function download529Export(kind) {
@@ -4151,6 +4216,72 @@ function wireTaxStaticControls() {
   }
 }
 
+function wire529WithdrawalControls() {
+  const yearSelect = document.getElementById("tax529YearSelect");
+  if (yearSelect) {
+    const current = new Date().getFullYear();
+    for (let y = current; y >= current - 3; y--) {
+      const opt = document.createElement("option");
+      opt.value = String(y);
+      opt.textContent = String(y);
+      yearSelect.appendChild(opt);
+    }
+    yearSelect.value = String(state.spend529.year);
+    yearSelect.addEventListener("change", () => {
+      state.spend529.year = Number.parseInt(yearSelect.value, 10);
+      render529Reconciliation();
+    });
+  }
+  const addBtn = document.getElementById("addWithdrawalBtn");
+  const dialog = document.getElementById("withdrawalDialog");
+  if (addBtn && dialog) {
+    addBtn.addEventListener("click", () => {
+      const dateInput = document.getElementById("withdrawalDate");
+      const amountInput = document.getElementById("withdrawalAmount");
+      const notesInput = document.getElementById("withdrawalNotes");
+      if (dateInput) {
+        const now = new Date();
+        dateInput.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      }
+      if (amountInput) amountInput.value = "";
+      if (notesInput) notesInput.value = "";
+      dialog.showModal();
+    });
+    const cancelBtn = document.getElementById("withdrawalCancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", () => dialog.close());
+    const saveBtn = document.getElementById("withdrawalSave");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", async () => {
+        const date = document.getElementById("withdrawalDate").value;
+        const amount = Number.parseFloat(document.getElementById("withdrawalAmount").value);
+        const notes = document.getElementById("withdrawalNotes").value.trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          showFlash("Pick a date for the withdrawal entry.");
+          return;
+        }
+        if (!Number.isFinite(amount) || amount <= 0) {
+          showFlash("Amount must be greater than $0.");
+          return;
+        }
+        if (!notes) {
+          showFlash("Add a short description.");
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          await apiPost("/api/529/withdrawal", { date, amount, notes });
+          await loadWithdrawals529();
+          dialog.close();
+        } catch (e) {
+          showFlash(`Add withdrawal failed: ${e.message}`);
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    }
+  }
+}
+
 function showSpendAnalysis() {
   stopLiveRefreshTimer();
   stopDashboardLiveRefreshTimer();
@@ -4631,6 +4762,7 @@ function wireEvents() {
   const spendTabTax = document.getElementById("spendTabTax");
   if (spendTabTax) spendTabTax.addEventListener("click", () => setSpendTab("tax"));
   wireQualify529Dialog();
+  wire529WithdrawalControls();
   wireTaxStaticControls();
   const exportCsvBtn = document.getElementById("export529CsvBtn");
   const exportZipBtn = document.getElementById("export529ZipBtn");
