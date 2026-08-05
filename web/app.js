@@ -280,10 +280,12 @@ const state = {
     portfolio: null,
     allocation: null,
     spendBar: null,
-    spendPie: null
+    spendPie: null,
+    cashFlow: null
   },
   spend: {
     transactions: [],
+    incomeTxs: [],
     bucket: localStorage.getItem("ft.spend.bucket") || "monthly",
     range: localStorage.getItem("ft.spend.range") || "3M",
     customFrom: localStorage.getItem("ft.spend.customFrom") || "",
@@ -3289,6 +3291,49 @@ function openSpendCategoryDrilldown(primary) {
   el.transactionsDialog.showModal();
 }
 
+function renderCashFlow() {
+  const canvas = document.getElementById("cashFlowChart");
+  if (!canvas) return;
+  destroyChart("cashFlow");
+
+  const spendBuckets = bucketSpendTransactions(state.spend.transactions || [], state.spend.bucket);
+  const incomeBuckets = bucketSpendTransactions(state.spend.incomeTxs || [], state.spend.bucket);
+
+  const keys = Array.from(new Set([
+    ...spendBuckets.map((b) => b.key),
+    ...incomeBuckets.map((b) => b.key)
+  ])).sort((a, b) => a - b);
+  const spendByKey = new Map(spendBuckets.map((b) => [b.key, b]));
+  const incomeByKey = new Map(incomeBuckets.map((b) => [b.key, b]));
+  const labels = keys.map((k) => (spendByKey.get(k) || incomeByKey.get(k)).label);
+  const spending = keys.map((k) => Number(((spendByKey.get(k) || {}).total || 0).toFixed(2)));
+  const income = keys.map((k) => Number(((incomeByKey.get(k) || {}).total || 0).toFixed(2)));
+  const net = keys.map((k, i) => Number((income[i] - spending[i]).toFixed(2)));
+
+  state.charts.cashFlow = new Chart(canvas, {
+    data: {
+      labels,
+      datasets: [
+        { type: "bar", label: "Income", data: income, backgroundColor: "#60d394" },
+        { type: "bar", label: "Spending", data: spending, backgroundColor: "#ee6055" },
+        { type: "line", label: "Net", data: net, borderColor: "#222", backgroundColor: "#222", tension: 0.2, pointRadius: 2 }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: "#555" } } },
+      scales: {
+        x: { ticks: { color: "#555" }, grid: { display: false } },
+        y: {
+          ticks: { callback: (v) => compactCurrency(v), color: "#555" },
+          grid: { color: "rgba(34, 34, 34, 0.08)" }
+        }
+      }
+    }
+  });
+}
+
 function renderSpendAnalysis() {
   const txs = state.spend.transactions || [];
   const buckets = bucketSpendTransactions(txs, state.spend.bucket);
@@ -3326,6 +3371,8 @@ function renderSpendAnalysis() {
       });
     });
   }
+
+  renderCashFlow();
 }
 
 async function loadSpendData() {
@@ -3333,11 +3380,13 @@ async function loadSpendData() {
   state.spend.loading = true;
   try {
     const { from, to } = rangeToDates(state.spend.range);
-    const [payload, tagsPayload] = await Promise.all([
+    const [payload, tagsPayload, incomePayload] = await Promise.all([
       apiGet(`/api/spend?from=${from}&to=${to}`),
-      apiGet("/api/529/tags")
+      apiGet("/api/529/tags"),
+      apiGet(`/api/income?from=${from}&to=${to}`)
     ]);
     state.spend.transactions = Array.isArray(payload.transactions) ? payload.transactions : [];
+    state.spend.incomeTxs = Array.isArray(incomePayload.transactions) ? incomePayload.transactions : [];
     state.spend.tags529 = {};
     (Array.isArray(tagsPayload.tags) ? tagsPayload.tags : []).forEach((tag) => {
       state.spend.tags529[tag.key] = tag;

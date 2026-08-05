@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="styles.css?v=20260805c" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260805j" defer></script>
+  <script src="app.js?v=20260805k" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -107,6 +107,13 @@
               <h3>By Category</h3>
             </div>
             <div id="spendCategoryTable" class="stocks-table-wrap"></div>
+          </article>
+
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <h3>Cash Flow</h3>
+            </div>
+            <canvas id="cashFlowChart" aria-label="Income vs spending"></canvas>
           </article>
         </div>
 
