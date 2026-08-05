@@ -68,6 +68,63 @@ int main()
     check(ExpenseTags::receiptMimeType("r.pdf") == "application/pdf", "pdf mime");
     check(ExpenseTags::receiptMimeType("r.bin") == "application/octet-stream", "unknown mime falls back");
 
+    // --- tags.json round-trip ---
+    const std::string tags_path = "test_529_tags.json";
+    std::remove(tags_path.c_str());
+
+    std::vector<ExpenseTags::TagRecord> missing_result;
+    check(ExpenseTags::loadTags(tags_path, missing_result) && missing_result.empty(),
+          "loadTags on missing file returns empty success");
+
+    ExpenseTags::TagRecord r1;
+    r1.key = "abc123-0";
+    r1.status = "qualified";
+    r1.qualified_amount = 40.0;
+    r1.receipts = {"target-receipt.jpg", "back-of-receipt.png"};
+    r1.account = "Capital One Balance";
+    r1.date = 1722400000;
+    r1.amount = 120.0;
+    r1.notes = "Target \"back to school\" run, aisle 5\\9";
+    r1.category = "GENERAL_MERCHANDISE_SUPERSTORES";
+    r1.created = 1722500000;
+
+    ExpenseTags::TagRecord r2;
+    r2.key = "def456-1";
+    r2.status = "dismissed";
+    r2.account = "Capital One Balance";
+    r2.date = 1722300000;
+    r2.amount = 15.5;
+    r2.notes = "Chipotle";
+    r2.category = "FOOD_AND_DRINK_RESTAURANT";
+    r2.created = 1722500001;
+
+    check(ExpenseTags::saveTags(tags_path, {r1, r2}), "saveTags succeeds");
+
+    std::vector<ExpenseTags::TagRecord> loaded;
+    check(ExpenseTags::loadTags(tags_path, loaded), "loadTags succeeds");
+    check(loaded.size() == 2, "loadTags returns both records");
+    if (loaded.size() == 2)
+    {
+        check(loaded[0].key == r1.key && loaded[0].status == "qualified", "record 1 identity round-trips");
+        check(std::abs(loaded[0].qualified_amount - 40.0) < 1e-9, "qualified_amount round-trips");
+        check(loaded[0].receipts.size() == 2 && loaded[0].receipts[1] == "back-of-receipt.png",
+              "receipts array round-trips");
+        check(loaded[0].notes == r1.notes, "quotes and backslashes in notes round-trip");
+        check(loaded[0].date == r1.date && std::abs(loaded[0].amount - 120.0) < 1e-9,
+              "denormalized fields round-trip");
+        check(loaded[1].status == "dismissed" && loaded[1].receipts.empty(),
+              "dismissed record round-trips with no receipts");
+    }
+
+    {
+        std::ofstream corrupt(tags_path);
+        corrupt << "{not json";
+    }
+    std::vector<ExpenseTags::TagRecord> corrupt_result;
+    check(!ExpenseTags::loadTags(tags_path, corrupt_result), "loadTags fails on corrupt file");
+
+    std::remove(tags_path.c_str());
+
     if (failures > 0)
     {
         std::cerr << failures << " check(s) failed" << std::endl;
