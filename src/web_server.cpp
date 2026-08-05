@@ -3396,6 +3396,67 @@ namespace
         return !ec;
     }
 
+    std::string csvField(const std::string& value)
+    {
+        if (value.find_first_of(",\"\n\r") == std::string::npos)
+        {
+            return value;
+        }
+        std::string escaped = "\"";
+        for (char c : value)
+        {
+            if (c == '"') escaped += "\"\"";
+            else escaped += c;
+        }
+        escaped += "\"";
+        return escaped;
+    }
+
+    std::vector<ExpenseTags::TagRecord> qualifiedTagsInRange(time_t from, time_t to, bool& ok)
+    {
+        std::vector<ExpenseTags::TagRecord> tags;
+        ok = ExpenseTags::loadTags(kTagsFile, tags);
+        std::vector<ExpenseTags::TagRecord> result;
+        if (!ok) return result;
+        for (const auto& tag : tags)
+        {
+            if (tag.status != "qualified") continue;
+            if (tag.date < from || tag.date > to) continue;
+            result.push_back(tag);
+        }
+        std::sort(result.begin(), result.end(),
+                  [](const ExpenseTags::TagRecord& a, const ExpenseTags::TagRecord& b)
+                  { return a.date < b.date; });
+        return result;
+    }
+
+    std::string build529Csv(const std::vector<ExpenseTags::TagRecord>& tags)
+    {
+        std::ostringstream out;
+        out << "date,account,merchant,category,charge_amount,qualified_amount,receipts\r\n";
+        char date_buf[16];
+        for (const auto& tag : tags)
+        {
+            std::tm tm_utc{};
+            gmtime_r(&tag.date, &tm_utc);
+            std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
+            std::string receipts_joined;
+            for (size_t i = 0; i < tag.receipts.size(); ++i)
+            {
+                if (i > 0) receipts_joined += "; ";
+                receipts_joined += tag.receipts[i];
+            }
+            out << date_buf << ","
+                << csvField(tag.account) << ","
+                << csvField(tag.notes) << ","
+                << csvField(tag.category) << ","
+                << jsonNumber(tag.amount) << ","
+                << jsonNumber(tag.qualified_amount) << ","
+                << csvField(receipts_joined) << "\r\n";
+        }
+        return out.str();
+    }
+
     // Collect lowercased + normalized institution names from every connected
     // portfolio so syncCashAccount can decide whether a Plaid TRANSFER is
     // between the user's own connected accounts vs a peer-to-peer payment.
@@ -4512,6 +4573,165 @@ namespace
             }
 
             return makeJsonResponse(405, makeErrorBody("Method not allowed"));
+        }
+
+        if (request.method == "GET" && request.path == "/api/529/export.csv")
+        {
+            const auto query_values = parseQuery(request.query);
+            const time_t now = std::time(nullptr);
+
+            time_t from = 0;
+            auto from_it = query_values.find("from");
+            if (from_it != query_values.end() && !from_it->second.empty())
+            {
+                from = parseIsoDateUTC(from_it->second);
+                if (from == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
+                }
+            }
+            else
+            {
+                from = now - (365LL * 86400);
+            }
+
+            time_t to = 0;
+            auto to_it = query_values.find("to");
+            if (to_it != query_values.end() && !to_it->second.empty())
+            {
+                to = parseIsoDateUTC(to_it->second);
+                if (to == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
+                }
+                // Bump to end-of-day so the chosen day is inclusive.
+                to += 86399;
+            }
+            else
+            {
+                to = now;
+            }
+
+            std::lock_guard<std::mutex> lock(g_529_mutex);
+            bool ok = false;
+            const auto tags = qualifiedTagsInRange(from, to, ok);
+            if (!ok)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+            }
+            HttpResponse response;
+            response.status = 200;
+            response.content_type = "text/csv; charset=utf-8";
+            response.body = build529Csv(tags);
+            return response;
+        }
+
+        if (request.method == "GET" && request.path == "/api/529/export.zip")
+        {
+            const auto query_values = parseQuery(request.query);
+            const time_t now = std::time(nullptr);
+
+            time_t from = 0;
+            auto from_it = query_values.find("from");
+            if (from_it != query_values.end() && !from_it->second.empty())
+            {
+                from = parseIsoDateUTC(from_it->second);
+                if (from == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
+                }
+            }
+            else
+            {
+                from = now - (365LL * 86400);
+            }
+
+            time_t to = 0;
+            auto to_it = query_values.find("to");
+            if (to_it != query_values.end() && !to_it->second.empty())
+            {
+                to = parseIsoDateUTC(to_it->second);
+                if (to == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
+                }
+                // Bump to end-of-day so the chosen day is inclusive.
+                to += 86399;
+            }
+            else
+            {
+                to = now;
+            }
+
+            std::lock_guard<std::mutex> lock(g_529_mutex);
+            bool ok = false;
+            const auto tags = qualifiedTagsInRange(from, to, ok);
+            if (!ok)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+            }
+
+            const std::filesystem::path staging = "data/529/.export_tmp";
+            std::error_code ec;
+            std::filesystem::remove_all(staging, ec);
+            std::filesystem::create_directories(staging, ec);
+            if (ec)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to create export staging dir"));
+            }
+
+            {
+                std::ofstream csv(staging / "expenses.csv", std::ios::binary);
+                csv << build529Csv(tags);
+            }
+
+            char date_buf[16];
+            for (const auto& tag : tags)
+            {
+                std::tm tm_utc{};
+                gmtime_r(&tag.date, &tm_utc);
+                std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
+                std::string merchant = ExpenseTags::sanitizeFilename(tag.notes);
+                if (merchant.size() > 40) merchant.resize(40);
+                if (merchant.empty()) merchant = "receipt";
+                for (const auto& receipt : tag.receipts)
+                {
+                    const std::filesystem::path src =
+                        std::filesystem::path(kReceiptsDir) / tag.key / receipt;
+                    const std::filesystem::path dst =
+                        staging / (std::string(date_buf) + "_" + merchant + "_" + receipt);
+                    std::filesystem::copy_file(src, dst,
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    // Missing files are skipped: the CSV still lists the name.
+                }
+            }
+
+            // macOS ships /usr/bin/zip. Quote the path defensively even though
+            // staging is a constant.
+            const std::string cmd =
+                "cd '" + staging.string() + "' && /usr/bin/zip -q -X export.zip . -r";
+            if (std::system(cmd.c_str()) != 0)
+            {
+                std::filesystem::remove_all(staging, ec);
+                return makeJsonResponse(500, makeErrorBody("zip failed"));
+            }
+
+            std::ifstream zip_file(staging / "export.zip", std::ios::binary);
+            if (!zip_file.is_open())
+            {
+                std::filesystem::remove_all(staging, ec);
+                return makeJsonResponse(500, makeErrorBody("zip output missing"));
+            }
+            std::ostringstream buffer;
+            buffer << zip_file.rdbuf();
+            zip_file.close();
+            std::filesystem::remove_all(staging, ec);
+
+            HttpResponse response;
+            response.status = 200;
+            response.content_type = "application/zip";
+            response.body = buffer.str();
+            return response;
         }
 
         if (request.method == "GET" && request.path == "/api/live-prices")
