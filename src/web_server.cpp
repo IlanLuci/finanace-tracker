@@ -635,6 +635,22 @@ namespace
         return std::isfinite(value) && value >= 0.0;
     }
 
+    // Constant-time comparison so token checking doesn't leak length/prefix
+    // timing. Both sides are small; XOR-accumulate over the full provided value.
+    bool tokenMatches(const std::string& provided, const std::string& expected)
+    {
+        if (provided.size() != expected.size())
+        {
+            return false;
+        }
+        volatile unsigned char acc = 0;
+        for (size_t i = 0; i < provided.size(); ++i)
+        {
+            acc = static_cast<unsigned char>(acc | (provided[i] ^ expected[i]));
+        }
+        return acc == 0;
+    }
+
     bool isValidTickerSymbol(const std::string& ticker)
     {
         if (ticker.empty() || ticker.size() > 12)
@@ -2597,7 +2613,7 @@ namespace
         out << "Content-Type: " << response.content_type << "\r\n";
         out << "Access-Control-Allow-Origin: *\r\n";
         out << "Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n";
-        out << "Access-Control-Allow-Headers: Content-Type\r\n";
+        out << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
         for (const auto& header : response.headers)
         {
             out << header.first << ": " << header.second << "\r\n";
@@ -4822,6 +4838,19 @@ namespace
         if (request.method == "GET" && request.path == "/api/health")
         {
             return makeJsonResponse(200, "{\"status\":\"ok\"}");
+        }
+
+        // Optional bearer-token auth: opt-in via API_TOKEN in the environment.
+        // Health stays open for pm2 checks; OPTIONS preflights returned above.
+        const char* api_token = std::getenv("API_TOKEN");
+        if (api_token != nullptr && api_token[0] != '\0')
+        {
+            const auto auth_it = request.headers.find("authorization");
+            const std::string expected = std::string("Bearer ") + api_token;
+            if (auth_it == request.headers.end() || !tokenMatches(auth_it->second, expected))
+            {
+                return makeJsonResponse(401, makeErrorBody("Missing or invalid API token"));
+            }
         }
 
         if (request.method == "GET" && request.path == "/api/portfolios")

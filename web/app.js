@@ -1,4 +1,5 @@
 const API_STORAGE_KEY = "portfolio-api-base";
+const API_TOKEN_STORAGE_KEY = "portfolio-api-token";
 const CURRENT_PORTFOLIO_KEY = "portfolio-current";
 const PINNED_ACCOUNTS_KEY = "portfolio-pinned-accounts";
 const ACCOUNT_FILTER_KEY = "portfolio-account-filter";
@@ -255,6 +256,7 @@ function sortAccountsForDashboard(portfolios) {
 
 const state = {
   apiBase: localStorage.getItem(API_STORAGE_KEY) || "",
+  apiToken: localStorage.getItem(API_TOKEN_STORAGE_KEY) || "",
   portfolios: [],
   currentPortfolio: null,
   currentStocks: [],
@@ -368,6 +370,7 @@ const el = {
   apiConfigPanel: document.getElementById("apiConfigPanel"),
   apiConfigForm: document.getElementById("apiConfigForm"),
   apiBaseInput: document.getElementById("apiBaseInput"),
+  apiTokenInput: document.getElementById("apiTokenInput"),
   apiResetBtn: document.getElementById("apiResetBtn"),
   apiStatus: document.getElementById("apiStatus"),
   portfolioPeriodSelect: document.getElementById("portfolioPeriodSelect"),
@@ -662,6 +665,14 @@ function apiUrl(path) {
   return `${state.apiBase}${path}`;
 }
 
+function authHeaders(extra) {
+  const headers = Object.assign({}, extra || {});
+  if (state.apiToken) {
+    headers["Authorization"] = `Bearer ${state.apiToken}`;
+  }
+  return headers;
+}
+
 function cacheKey(path) {
   return API_CACHE_PREFIX + path;
 }
@@ -802,7 +813,7 @@ function endRequest() {
 async function apiGet(path) {
   beginRequest();
   try {
-    const response = await fetch(apiUrl(path));
+    const response = await fetch(apiUrl(path), { headers: authHeaders() });
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
@@ -834,7 +845,7 @@ async function apiGetWithTimeout(path, timeoutMs) {
   beginRequest();
 
   try {
-    const response = await fetch(apiUrl(path), { signal: controller.signal });
+    const response = await fetch(apiUrl(path), { signal: controller.signal, headers: authHeaders() });
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.error || `Request failed: ${response.status}`);
@@ -860,9 +871,7 @@ async function apiPost(path, body) {
   try {
     const response = await fetch(apiUrl(path), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body)
     });
 
@@ -889,7 +898,7 @@ async function apiUploadReceiptTo(basePath, key, file) {
     const query = `key=${encodeURIComponent(key)}&filename=${encodeURIComponent(file.name)}`;
     const response = await fetch(apiUrl(`${basePath}?${query}`), {
       method: "POST",
-      headers: { "Content-Type": file.type || "application/octet-stream" },
+      headers: authHeaders({ "Content-Type": file.type || "application/octet-stream" }),
       body: file
     });
     const data = await response.json();
@@ -916,7 +925,8 @@ async function apiDelete(path) {
   beginRequest();
   try {
     const response = await fetch(apiUrl(path), {
-      method: "DELETE"
+      method: "DELETE",
+      headers: authHeaders()
     });
 
     const data = await response.json();
@@ -941,9 +951,7 @@ async function apiPatch(path, body) {
   try {
     const response = await fetch(apiUrl(path), {
       method: "PATCH",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body)
     });
 
@@ -3536,7 +3544,7 @@ async function download529Export(kind) {
   const { from, to } = rangeToDates(state.spend.range);
   beginRequest();
   try {
-    const response = await fetch(apiUrl(`/api/529/export.${kind}?from=${from}&to=${to}`));
+    const response = await fetch(apiUrl(`/api/529/export.${kind}?from=${from}&to=${to}`), { headers: authHeaders() });
     if (!response.ok) {
       let message = `Export failed: ${response.status}`;
       try {
@@ -3562,7 +3570,7 @@ async function downloadTaxExport(kind) {
   const year = state.tax.year;
   beginRequest();
   try {
-    const response = await fetch(apiUrl(`/api/tax/export/${kind}.csv?year=${year}`));
+    const response = await fetch(apiUrl(`/api/tax/export/${kind}.csv?year=${year}`), { headers: authHeaders() });
     if (!response.ok) {
       let message = `Export failed: ${response.status}`;
       try {
@@ -4770,6 +4778,13 @@ function saveApiBase(event) {
   const raw = el.apiBaseInput.value.trim();
   state.apiBase = raw.replace(/\/$/, "");
   localStorage.setItem(API_STORAGE_KEY, state.apiBase);
+  const token = el.apiTokenInput.value.trim();
+  state.apiToken = token;
+  if (token) {
+    localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+  } else {
+    localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+  }
   el.apiStatus.textContent = "Saved. Reloading data...";
   loadDashboard();
 }
@@ -4778,6 +4793,9 @@ function resetApiBase() {
   state.apiBase = "";
   localStorage.removeItem(API_STORAGE_KEY);
   el.apiBaseInput.value = "";
+  state.apiToken = "";
+  localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+  el.apiTokenInput.value = "";
   el.apiStatus.textContent = "Reset to same-origin API.";
   loadDashboard();
 }
@@ -5004,6 +5022,7 @@ function registerServiceWorker() {
 
 function init() {
   el.apiBaseInput.value = state.apiBase;
+  el.apiTokenInput.value = state.apiToken;
   setActiveView("dashboard");
   wireEvents();
   document.addEventListener("visibilitychange", handleVisibilityChange);

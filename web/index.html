@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="styles.css?v=20260805c" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260805k" defer></script>
+  <script src="app.js?v=20260805l" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -30,6 +30,8 @@
       <form id="apiConfigForm">
         <label for="apiBaseInput">Base URL</label>
         <input id="apiBaseInput" name="apiBase" type="url" placeholder="http://localhost:8080" autocomplete="off" />
+        <label for="apiTokenInput">API token (optional)</label>
+        <input id="apiTokenInput" name="apiToken" type="password" placeholder="Leave empty if the server has no API_TOKEN" autocomplete="off" />
         <div class="row-actions">
           <button class="primary-btn" type="submit">Save</button>
           <button id="apiResetBtn" class="ghost-btn" type="button">Reset</button>
