@@ -3659,28 +3659,32 @@ function wireTaxMarkedListEvents(host) {
       }
     });
   });
-  host.querySelectorAll("tr[data-key]").forEach((row) => {
-    row.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      row.classList.add("receipt-drop-active");
-    });
-    row.addEventListener("dragleave", () => row.classList.remove("receipt-drop-active"));
-    row.addEventListener("drop", async (event) => {
-      event.preventDefault();
-      row.classList.remove("receipt-drop-active");
-      const files = Array.from(event.dataTransfer?.files || []);
-      if (files.length === 0) return;
-      try {
-        for (const file of files) {
-          await apiUploadReceiptTo("/api/tax/receipt", row.dataset.key, file);
+  // Receipts only exist for deductions — dropping a file on an income row
+  // would hit /api/tax/receipt with an income key and the server would 404.
+  if (host.id === "taxMarkedDeductionsTable") {
+    host.querySelectorAll("tr[data-key]").forEach((row) => {
+      row.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        row.classList.add("receipt-drop-active");
+      });
+      row.addEventListener("dragleave", () => row.classList.remove("receipt-drop-active"));
+      row.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        row.classList.remove("receipt-drop-active");
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (files.length === 0) return;
+        try {
+          for (const file of files) {
+            await apiUploadReceiptTo("/api/tax/receipt", row.dataset.key, file);
+          }
+        } catch (e) {
+          showFlash(`Upload failed: ${e.message}`);
+        } finally {
+          await refreshTaxTags();
         }
-      } catch (e) {
-        showFlash(`Upload failed: ${e.message}`);
-      } finally {
-        await refreshTaxTags();
-      }
+      });
     });
-  });
+  }
 }
 
 function renderTaxIncomeQueue(incomeTxByKey) { /* populated in Task 8 */ }
