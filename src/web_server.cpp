@@ -3370,6 +3370,31 @@ namespace
         return std::nullopt;
     }
 
+    bool parseYearParam(const std::map<std::string, std::string>& query_values,
+                        time_t& from, time_t& to)
+    {
+        const auto it = query_values.find("year");
+        if (it == query_values.end() || it->second.empty()) return false;
+        const auto maybe_year = parsePositiveInt(trim(it->second));
+        if (!maybe_year.has_value()) return false;
+        const int year = maybe_year.value();
+        if (year < 2000 || year > 2100) return false;
+        std::tm start{};
+        start.tm_year = year - 1900;
+        start.tm_mon = 0;
+        start.tm_mday = 1;
+        from = timegm(&start);
+        std::tm end{};
+        end.tm_year = year - 1900;
+        end.tm_mon = 11;
+        end.tm_mday = 31;
+        end.tm_hour = 23;
+        end.tm_min = 59;
+        end.tm_sec = 59;
+        to = timegm(&end);
+        return true;
+    }
+
     std::string buildSpendJson(PortfolioManager& manager, time_t from, time_t to)
     {
         const std::vector<SpendTxn> txs = collectSpendTransactions(manager, from, to);
@@ -3641,10 +3666,10 @@ namespace
         return escaped;
     }
 
-    std::vector<ExpenseTags::TagRecord> qualifiedTagsInRange(time_t from, time_t to, bool& ok)
+    std::vector<ExpenseTags::TagRecord> qualifiedTagsInRange(const char* tags_file, time_t from, time_t to, bool& ok)
     {
         std::vector<ExpenseTags::TagRecord> tags;
-        ok = ExpenseTags::loadTags(kTagsFile, tags);
+        ok = ExpenseTags::loadTags(tags_file, tags);
         std::vector<ExpenseTags::TagRecord> result;
         if (!ok) return result;
         for (const auto& tag : tags)
@@ -3659,31 +3684,41 @@ namespace
         return result;
     }
 
-    std::string build529Csv(const std::vector<ExpenseTags::TagRecord>& tags)
+    std::string buildTagCsv(const std::vector<ExpenseTags::TagRecord>& tags,
+                            const char* header_row, bool include_receipts)
     {
         std::ostringstream out;
-        out << "date,account,merchant,category,charge_amount,qualified_amount,receipts\r\n";
+        out << header_row;
         char date_buf[16];
         for (const auto& tag : tags)
         {
             std::tm tm_utc{};
             gmtime_r(&tag.date, &tm_utc);
             std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
-            std::string receipts_joined;
-            for (size_t i = 0; i < tag.receipts.size(); ++i)
-            {
-                if (i > 0) receipts_joined += "; ";
-                receipts_joined += tag.receipts[i];
-            }
             out << date_buf << ","
                 << csvField(tag.account) << ","
                 << csvField(tag.notes) << ","
                 << csvField(tag.category) << ","
                 << jsonNumber(tag.amount) << ","
-                << jsonNumber(tag.qualified_amount) << ","
-                << csvField(receipts_joined) << "\r\n";
+                << jsonNumber(tag.qualified_amount);
+            if (include_receipts)
+            {
+                std::string receipts_joined;
+                for (size_t i = 0; i < tag.receipts.size(); ++i)
+                {
+                    if (i > 0) receipts_joined += "; ";
+                    receipts_joined += tag.receipts[i];
+                }
+                out << "," << csvField(receipts_joined);
+            }
+            out << "\r\n";
         }
         return out.str();
+    }
+
+    std::string build529Csv(const std::vector<ExpenseTags::TagRecord>& tags)
+    {
+        return buildTagCsv(tags, "date,account,merchant,category,charge_amount,qualified_amount,receipts\r\n", true);
     }
 
     HttpResponse handleReceiptRoute(const HttpRequest& request, const char* tags_file, const char* receipts_dir, std::mutex& store_mutex)
@@ -4777,6 +4812,35 @@ namespace
             return handleReceiptRoute(request, kTaxDeductionTagsFile, kTaxReceiptsDir, g_tax_mutex);
         }
 
+        if (request.method == "GET" &&
+            (request.path == "/api/tax/export/income.csv" ||
+             request.path == "/api/tax/export/deductions.csv"))
+        {
+            const auto query_values = parseQuery(request.query);
+            time_t from = 0;
+            time_t to = 0;
+            if (!parseYearParam(query_values, from, to))
+            {
+                return makeJsonResponse(400, makeErrorBody("year must be YYYY (2000-2100)"));
+            }
+            const bool is_income = request.path == "/api/tax/export/income.csv";
+            std::lock_guard<std::mutex> lock(g_tax_mutex);
+            bool ok = false;
+            const auto tags = qualifiedTagsInRange(
+                is_income ? kTaxIncomeTagsFile : kTaxDeductionTagsFile, from, to, ok);
+            if (!ok)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
+            }
+            HttpResponse response;
+            response.status = 200;
+            response.content_type = "text/csv; charset=utf-8";
+            response.body = is_income
+                ? buildTagCsv(tags, "date,account,source,category,deposit_amount,taxable_amount\r\n", false)
+                : buildTagCsv(tags, "date,account,merchant,category,charge_amount,deductible_amount,receipts\r\n", true);
+            return response;
+        }
+
         if (request.method == "GET" && request.path == "/api/529/export.csv")
         {
             const auto query_values = parseQuery(request.query);
@@ -4790,7 +4854,7 @@ namespace
 
             std::lock_guard<std::mutex> lock(g_529_mutex);
             bool ok = false;
-            const auto tags = qualifiedTagsInRange(from, to, ok);
+            const auto tags = qualifiedTagsInRange(kTagsFile, from, to, ok);
             if (!ok)
             {
                 return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
@@ -4830,7 +4894,7 @@ namespace
             {
                 std::lock_guard<std::mutex> lock(g_529_mutex);
                 bool ok = false;
-                const auto tags = qualifiedTagsInRange(from, to, ok);
+                const auto tags = qualifiedTagsInRange(kTagsFile, from, to, ok);
                 if (!ok)
                 {
                     std::filesystem::remove_all(staging, ec);
