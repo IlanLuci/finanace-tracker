@@ -7,10 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260805a" />
+  <link rel="stylesheet" href="styles.css?v=20260805b" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260805d" defer></script>
+  <script src="app.js?v=20260805e" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -54,7 +54,7 @@
         <div class="page-head">
           <div>
             <p class="eyebrow">Analytics</p>
-            <h2>Spending</h2>
+            <h2>Spending &amp; Tax</h2>
           </div>
           <div class="page-head-actions">
             <button id="backToDashFromSpendBtn" class="ghost-btn" type="button">Back to Dashboard</button>
@@ -64,6 +64,7 @@
         <div class="spend-tabs" role="tablist">
           <button id="spendTabAnalysis" class="spend-tab is-active" type="button" role="tab">Analysis</button>
           <button id="spendTab529" class="spend-tab" type="button" role="tab">529 Expenses</button>
+          <button id="spendTabTax" class="spend-tab" type="button" role="tab">Tax</button>
         </div>
 
         <div id="spendAnalysisPane">
@@ -136,6 +137,61 @@
             <div id="qualified529Table" class="stocks-table-wrap"></div>
           </article>
           <input id="receipt529FileInput" type="file" accept="image/*,.pdf,.heic" multiple hidden />
+        </div>
+
+        <div id="spendTaxPane" hidden>
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Tax Year Summary</h3>
+              <div class="chart-tools">
+                <select id="taxYearSelect" class="graph-period-select" aria-label="Tax year"></select>
+                <button id="exportTaxIncomeBtn" class="ghost-btn" type="button">Export income CSV</button>
+                <button id="exportTaxDeductionsBtn" class="ghost-btn" type="button">Export deductions CSV</button>
+              </div>
+            </div>
+            <p id="taxSummaryIncome" class="muted-note"></p>
+            <p id="taxSummaryDeductions" class="muted-note"></p>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Income — Review Queue</h3>
+              <p class="muted-note">Deposits Plaid categorized as income</p>
+            </div>
+            <div id="taxIncomeQueueTable" class="stocks-table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Marked Taxable Income</h3>
+            </div>
+            <div id="taxMarkedIncomeTable" class="stocks-table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <details class="tax-browser">
+              <summary>All deposits</summary>
+              <input id="taxDepositsSearch" class="tax-search" type="search" placeholder="Search deposits…" />
+              <div id="taxDepositsTable" class="stocks-table-wrap"></div>
+            </details>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Marked Deductions</h3>
+            </div>
+            <div id="taxMarkedDeductionsTable" class="stocks-table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <details class="tax-browser">
+              <summary>Expense browser</summary>
+              <input id="taxExpensesSearch" class="tax-search" type="search" placeholder="Search expenses…" />
+              <div id="taxExpensesTable" class="stocks-table-wrap"></div>
+            </details>
+          </article>
+
+          <input id="receiptTaxFileInput" type="file" accept="image/*,.pdf,.heic" multiple hidden />
         </div>
       </section>
 
@@ -217,13 +273,13 @@
   </dialog>
 
   <dialog id="qualify529Dialog" class="dialog">
-    <h3>Qualify for 529</h3>
+    <h3 id="qualify529Title">Qualify for 529</h3>
     <p id="qualify529Merchant" class="muted-note"></p>
     <label>
       Qualified amount
       <input id="qualify529Amount" type="number" step="0.01" min="0.01" inputmode="decimal" />
     </label>
-    <label>
+    <label id="qualify529FilesWrap">
       Receipts (optional)
       <input id="qualify529Files" type="file" accept="image/*,.pdf,.heic" multiple />
     </label>

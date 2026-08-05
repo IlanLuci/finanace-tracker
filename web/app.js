@@ -292,6 +292,15 @@ const state = {
     tab: "analysis",
     tags529: {}
   },
+  tax: {
+    year: new Date().getFullYear(),
+    spendTxs: [],
+    incomeTxs: [],
+    tags: { income: {}, deductions: {} },
+    loading: false,
+    depositsSearch: "",
+    expensesSearch: ""
+  },
   stocksSort: { key: null, dir: null },
   allTransactions: {},
   monthlyShowAll: false,
@@ -1933,7 +1942,7 @@ function renderDashboard() {
         <h3>Accounts</h3>
         <div class="chart-tools">
           ${filterMarkup}
-          <button id="openSpendAnalysisBtn" class="ghost-btn" type="button">Spending</button>
+          <button id="openSpendAnalysisBtn" class="ghost-btn" type="button">Spending &amp; Tax</button>
           <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Account</button>
         </div>
       </div>
@@ -3335,6 +3344,11 @@ function setSpendTab(tab) {
   if (analysisBtn) analysisBtn.classList.toggle("is-active", tab === "analysis");
   if (btn529) btn529.classList.toggle("is-active", tab === "529");
   if (tab === "529") render529Tab();
+  const taxPane = document.getElementById("spendTaxPane");
+  const taxBtn = document.getElementById("spendTabTax");
+  if (taxPane) taxPane.hidden = tab !== "tax";
+  if (taxBtn) taxBtn.classList.toggle("is-active", tab === "tax");
+  if (tab === "tax") renderTaxTab();
 }
 
 const CANDIDATE_529_GENERAL = new Set([
@@ -3421,6 +3435,8 @@ async function saveTag529(key, status, qualifiedAmount, refresh = true) {
   await apiPost("/api/529/tag", body);
   if (refresh) await refresh529Tags();
 }
+
+function renderTaxTab() { /* populated in Task 7 */ }
 
 function render529Tab() {
   const { fromTs, toTs } = spendRangeBounds();
@@ -3681,7 +3697,7 @@ function showSpendAnalysis() {
   setActiveView("spend");
   setBreadcrumbs([
     { label: "Assets", onClick: showDashboard },
-    { label: "Spending" }
+    { label: "Spending & Tax" }
   ]);
 
   const bucketSelect = document.getElementById("spendBucketSelect");
@@ -4150,6 +4166,8 @@ function wireEvents() {
   const spendTab529 = document.getElementById("spendTab529");
   if (spendTabAnalysis) spendTabAnalysis.addEventListener("click", () => setSpendTab("analysis"));
   if (spendTab529) spendTab529.addEventListener("click", () => setSpendTab("529"));
+  const spendTabTax = document.getElementById("spendTabTax");
+  if (spendTabTax) spendTabTax.addEventListener("click", () => setSpendTab("tax"));
   wireQualify529Dialog();
   const exportCsvBtn = document.getElementById("export529CsvBtn");
   const exportZipBtn = document.getElementById("export529ZipBtn");
