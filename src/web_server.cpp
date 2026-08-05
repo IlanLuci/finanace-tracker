@@ -4455,6 +4455,9 @@ namespace
                 tag->receipts.push_back(stored_name);
                 if (!ExpenseTags::saveTags(kTagsFile, tags))
                 {
+                    // Don't orphan the file: no tag record references it and it
+                    // would shift future dedup suffixes. Best-effort removal.
+                    std::filesystem::remove(final_path, ec);
                     return makeJsonResponse(500, makeErrorBody("Receipt stored but tag update failed"));
                 }
                 return makeJsonResponse(201, std::string("{\"filename\":") + jsonString(stored_name) + "}");
@@ -4485,18 +4488,25 @@ namespace
                     return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
                 }
                 std::error_code ec;
-                std::filesystem::remove(receipt_dir / safe_name, ec);
+                const bool file_removed = std::filesystem::remove(receipt_dir / safe_name, ec);
+                bool record_removed = false;
                 auto tag = std::find_if(tags.begin(), tags.end(),
                     [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
                 if (tag != tags.end())
                 {
+                    const size_t before = tag->receipts.size();
                     tag->receipts.erase(
                         std::remove(tag->receipts.begin(), tag->receipts.end(), safe_name),
                         tag->receipts.end());
-                    if (!ExpenseTags::saveTags(kTagsFile, tags))
+                    record_removed = tag->receipts.size() != before;
+                    if (record_removed && !ExpenseTags::saveTags(kTagsFile, tags))
                     {
                         return makeJsonResponse(500, makeErrorBody("Failed to save 529 tags"));
                     }
+                }
+                if (!file_removed && !record_removed)
+                {
+                    return makeJsonResponse(404, makeErrorBody("Receipt not found"));
                 }
                 return makeJsonResponse(200, "{\"removed\":true}");
             }
