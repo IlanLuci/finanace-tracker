@@ -3339,9 +3339,113 @@ namespace
         return result;
     }
 
+    // Parses optional from/to (YYYY-MM-DD) query params with the /api/spend
+    // defaults: from = 365 days ago, to = now; "to" bumped to end-of-day.
+    // Returns a 400 response on malformed values, else nullopt.
+    std::optional<HttpResponse> parseRangeParams(const std::map<std::string, std::string>& query_values,
+                                                 time_t& from, time_t& to)
+    {
+        const time_t now = std::time(nullptr);
+        from = now - (365LL * 86400);
+        to = now;
+        auto from_it = query_values.find("from");
+        if (from_it != query_values.end() && !from_it->second.empty())
+        {
+            from = parseIsoDateUTC(from_it->second);
+            if (from == 0)
+            {
+                return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
+            }
+        }
+        auto to_it = query_values.find("to");
+        if (to_it != query_values.end() && !to_it->second.empty())
+        {
+            to = parseIsoDateUTC(to_it->second);
+            if (to == 0)
+            {
+                return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
+            }
+            to += 86399; // end-of-day inclusive
+        }
+        return std::nullopt;
+    }
+
     std::string buildSpendJson(PortfolioManager& manager, time_t from, time_t to)
     {
         const std::vector<SpendTxn> txs = collectSpendTransactions(manager, from, to);
+        std::ostringstream out;
+        out << "{"
+            << "\"from\":" << static_cast<long long>(from) << ","
+            << "\"to\":" << static_cast<long long>(to) << ","
+            << "\"transactions\":[";
+        for (size_t i = 0; i < txs.size(); ++i)
+        {
+            if (i > 0) out << ",";
+            out << "{"
+                << "\"key\":" << jsonString(txs[i].key) << ","
+                << "\"date\":" << static_cast<long long>(txs[i].date) << ","
+                << "\"amount\":" << jsonNumber(txs[i].amount) << ","
+                << "\"category\":" << jsonString(txs[i].category) << ","
+                << "\"notes\":" << jsonString(txs[i].notes) << ","
+                << "\"account\":" << jsonString(txs[i].account) << ","
+                << "\"account_type\":" << jsonString(txs[i].account_type)
+                << "}";
+        }
+        out << "]}";
+        return out.str();
+    }
+
+    // Income-side mirror of collectSpendTransactions: DEPOSIT and INTEREST
+    // transactions on CASH portfolios, keyed over the FULL history before the
+    // date filter so occurrence indices are range-stable. Income keys are a
+    // separate namespace from spend keys (separate endpoint + tag files), so
+    // a same-tuple deposit/withdrawal collision is harmless.
+    std::vector<SpendTxn> collectIncomeTransactions(PortfolioManager& manager, time_t from, time_t to)
+    {
+        std::vector<SpendTxn> result;
+        ExpenseTags::KeyAssigner key_assigner;
+
+        if (!manager.scanPortfolios())
+        {
+            return result;
+        }
+
+        const std::vector<std::string> names = manager.getPortfolioNames();
+        for (const std::string& name : names)
+        {
+            Portfolio portfolio;
+            if (!loadPortfolioCached(manager, name, portfolio)) continue;
+            const PortfolioType pt = portfolio.getType();
+            if (pt != PortfolioType::CASH) continue;
+
+            for (const Transaction& tx : portfolio.getTransactions())
+            {
+                if (tx.type != TransactionType::DEPOSIT &&
+                    tx.type != TransactionType::INTEREST) continue;
+                if (notesIsPending(tx.notes)) continue;
+                if (notesStartsWithTxfr(tx.notes)) continue;
+
+                const std::string key = key_assigner.next(name, tx.date, tx.amount, tx.notes);
+
+                if (tx.date < from || tx.date > to) continue;
+
+                SpendTxn income_tx;
+                income_tx.key = key;
+                income_tx.date = tx.date;
+                income_tx.amount = std::abs(tx.amount);
+                income_tx.category = tx.category;
+                income_tx.notes = tx.notes;
+                income_tx.account = name;
+                income_tx.account_type = portfolioTypeToString(pt);
+                result.push_back(income_tx);
+            }
+        }
+        return result;
+    }
+
+    std::string buildIncomeJson(PortfolioManager& manager, time_t from, time_t to)
+    {
+        const std::vector<SpendTxn> txs = collectIncomeTransactions(manager, from, to);
         std::ostringstream out;
         out << "{"
             << "\"from\":" << static_cast<long long>(from) << ","
@@ -4274,41 +4378,27 @@ namespace
         if (request.method == "GET" && request.path == "/api/spend")
         {
             const auto query_values = parseQuery(request.query);
-            const time_t now = std::time(nullptr);
-
             time_t from = 0;
-            auto from_it = query_values.find("from");
-            if (from_it != query_values.end() && !from_it->second.empty())
-            {
-                from = parseIsoDateUTC(from_it->second);
-                if (from == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
-                }
-            }
-            else
-            {
-                from = now - (365LL * 86400);
-            }
-
             time_t to = 0;
-            auto to_it = query_values.find("to");
-            if (to_it != query_values.end() && !to_it->second.empty())
+            auto range_error = parseRangeParams(query_values, from, to);
+            if (range_error.has_value())
             {
-                to = parseIsoDateUTC(to_it->second);
-                if (to == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
-                }
-                // Bump to end-of-day so the chosen day is inclusive.
-                to += 86399;
+                return range_error.value();
             }
-            else
-            {
-                to = now;
-            }
-
             return makeJsonResponse(200, buildSpendJson(manager, from, to));
+        }
+
+        if (request.method == "GET" && request.path == "/api/income")
+        {
+            const auto query_values = parseQuery(request.query);
+            time_t from = 0;
+            time_t to = 0;
+            auto range_error = parseRangeParams(query_values, from, to);
+            if (range_error.has_value())
+            {
+                return range_error.value();
+            }
+            return makeJsonResponse(200, buildIncomeJson(manager, from, to));
         }
 
         if (request.method == "GET" && request.path == "/api/529/tags")
@@ -4596,38 +4686,12 @@ namespace
         if (request.method == "GET" && request.path == "/api/529/export.csv")
         {
             const auto query_values = parseQuery(request.query);
-            const time_t now = std::time(nullptr);
-
             time_t from = 0;
-            auto from_it = query_values.find("from");
-            if (from_it != query_values.end() && !from_it->second.empty())
-            {
-                from = parseIsoDateUTC(from_it->second);
-                if (from == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
-                }
-            }
-            else
-            {
-                from = now - (365LL * 86400);
-            }
-
             time_t to = 0;
-            auto to_it = query_values.find("to");
-            if (to_it != query_values.end() && !to_it->second.empty())
+            auto range_error = parseRangeParams(query_values, from, to);
+            if (range_error.has_value())
             {
-                to = parseIsoDateUTC(to_it->second);
-                if (to == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
-                }
-                // Bump to end-of-day so the chosen day is inclusive.
-                to += 86399;
-            }
-            else
-            {
-                to = now;
+                return range_error.value();
             }
 
             std::lock_guard<std::mutex> lock(g_529_mutex);
@@ -4647,38 +4711,12 @@ namespace
         if (request.method == "GET" && request.path == "/api/529/export.zip")
         {
             const auto query_values = parseQuery(request.query);
-            const time_t now = std::time(nullptr);
-
             time_t from = 0;
-            auto from_it = query_values.find("from");
-            if (from_it != query_values.end() && !from_it->second.empty())
-            {
-                from = parseIsoDateUTC(from_it->second);
-                if (from == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("from must be YYYY-MM-DD"));
-                }
-            }
-            else
-            {
-                from = now - (365LL * 86400);
-            }
-
             time_t to = 0;
-            auto to_it = query_values.find("to");
-            if (to_it != query_values.end() && !to_it->second.empty())
+            auto range_error = parseRangeParams(query_values, from, to);
+            if (range_error.has_value())
             {
-                to = parseIsoDateUTC(to_it->second);
-                if (to == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("to must be YYYY-MM-DD"));
-                }
-                // Bump to end-of-day so the chosen day is inclusive.
-                to += 86399;
-            }
-            else
-            {
-                to = now;
+                return range_error.value();
             }
 
             // Serialize whole-export against other exports (shared staging
