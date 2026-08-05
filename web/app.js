@@ -3353,6 +3353,17 @@ function isCandidate529Category(category) {
   return CANDIDATE_529_GENERAL.has(category);
 }
 
+// 529 room-and-board/supplies only count during the academic year
+// (Aug 15 through May 15, inclusive). Summer charges are excluded.
+function isWithinAcademicYear(dateTs) {
+  const d = new Date(dateTs * 1000);
+  const month = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  if (month > 8 || (month === 8 && day >= 15)) return true;
+  if (month < 5 || (month === 5 && day <= 15)) return true;
+  return false;
+}
+
 function spendRangeBounds() {
   // Same range the /api/spend request used, as unix seconds for filtering
   // denormalized tag dates. "to" is bumped to end-of-day like the backend.
@@ -3557,6 +3568,7 @@ function render529Queue(txByKey) {
     .filter((tx) =>
       tx.account_type === "DEBT" &&
       isCandidate529Category(tx.category) &&
+      isWithinAcademicYear(tx.date) &&
       !state.spend.tags529[tx.key])
     .sort((a, b) => (b.date || 0) - (a.date || 0));
 
@@ -3630,6 +3642,10 @@ function wireQualify529Dialog() {
       if (!Number.isFinite(qualifiedAmount) || qualifiedAmount <= 0 ||
           qualifiedAmount > qualify529Target.amount + 0.005) {
         showFlash("Qualified amount must be between $0.01 and the charge amount.");
+        return;
+      }
+      if (!isWithinAcademicYear(qualify529Target.date)) {
+        showFlash("Only academic-year expenses (Aug 15 – May 15) qualify for 529.");
         return;
       }
       save.disabled = true;

@@ -23,6 +23,9 @@ summing tagged amounts into a 529 qualified-expense total. Lives on the renamed
 - **Upload UX:** Camera capture on mobile + drag-drop/file-pick on desktop; images and PDFs.
 - **Layout:** Sub-tabs on the Spending page: "Analysis" (existing) and "529 Expenses" (new).
 - **Export:** CSV of qualified expenses + ZIP (CSV + receipt files) for the selected range.
+- **Academic-year gate (added 2026-08-05, post-v1):** only charges dated Aug 15 – May 15
+  (inclusive) can be qualified; the review queue hides summer charges and the qualify
+  dialog rejects them. Enforced in the frontend only — the tag API stays permissive.
 
 ## Architecture
 
