@@ -3536,6 +3536,7 @@ namespace
 
     const char* kTagsFile = "data/529/tags.json";
     const char* kReceiptsDir = "data/529/receipts";
+    const char* k529WithdrawalsFile = "data/529/withdrawals.json";
 
     // Request handling is one-thread-per-connection; serialize every
     // load-modify-save of tags.json and every receipt-dir mutation.
@@ -3588,6 +3589,68 @@ namespace
         std::filesystem::create_directories("data/tax", ec);
         std::filesystem::create_directories(kTaxReceiptsDir, ec);
         return !ec;
+    }
+
+    HttpResponse createManualRecord(const char* tags_file, std::mutex& store_mutex,
+                                    bool (*ensure_dirs)(), const std::string& date_str,
+                                    double amount, const std::string& notes,
+                                    const char* account, const char* category)
+    {
+        const time_t entry_date = parseIsoDateUTC(date_str);
+        if (entry_date == 0)
+        {
+            return makeJsonResponse(400, makeErrorBody("date must be YYYY-MM-DD"));
+        }
+        if (!(amount > 0.0))
+        {
+            return makeJsonResponse(400, makeErrorBody("amount must be > 0"));
+        }
+        const std::string trimmed_notes = trim(notes);
+        if (trimmed_notes.empty())
+        {
+            return makeJsonResponse(400, makeErrorBody("notes must not be empty"));
+        }
+
+        std::lock_guard<std::mutex> lock(store_mutex);
+        if (!ensure_dirs())
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to create data/tax"));
+        }
+        std::vector<ExpenseTags::TagRecord> tags;
+        if (!ExpenseTags::loadTags(tags_file, tags))
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
+        }
+
+        const time_t now = std::time(nullptr);
+        std::string manual_key;
+        int suffix = 0;
+        do
+        {
+            manual_key = "manual-" + std::to_string(static_cast<long long>(now)) +
+                         "-" + std::to_string(suffix++);
+        } while (std::any_of(tags.begin(), tags.end(),
+                 [&manual_key](const ExpenseTags::TagRecord& t)
+                 {
+                     return t.key == manual_key;
+                 }));
+
+        ExpenseTags::TagRecord record;
+        record.key = manual_key;
+        record.status = "qualified";
+        record.qualified_amount = amount;
+        record.account = account;
+        record.date = entry_date;
+        record.amount = amount;
+        record.notes = trimmed_notes;
+        record.category = category;
+        record.created = now;
+        tags.push_back(record);
+        if (!ExpenseTags::saveTags(tags_file, tags))
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to save tax tags"));
+        }
+        return makeJsonResponse(201, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
     }
 
     HttpResponse applyTagUpsert(const std::string& key, const std::string& status,
@@ -4781,6 +4844,75 @@ namespace
                                   ensure529Dirs, manager, collectSpendTransactions);
         }
 
+        if (request.method == "GET" && request.path == "/api/529/withdrawals")
+        {
+            std::lock_guard<std::mutex> lock(g_529_mutex);
+            std::vector<ExpenseTags::TagRecord> withdrawals;
+            if (!ExpenseTags::loadTags(k529WithdrawalsFile, withdrawals))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read 529 withdrawals"));
+            }
+            std::ostringstream out;
+            out << "{\"withdrawals\":[";
+            for (size_t i = 0; i < withdrawals.size(); ++i)
+            {
+                if (i > 0) out << ",";
+                out << serializeTagRecord(withdrawals[i]);
+            }
+            out << "]}";
+            return makeJsonResponse(200, out.str());
+        }
+
+        if (request.method == "POST" && request.path == "/api/529/withdrawal")
+        {
+            JsonValue body;
+            HttpResponse parse_error = parseJsonBodyObject(request, body);
+            if (parse_error.status != 200)
+            {
+                return parse_error;
+            }
+
+            const auto raw_status = getObjectString(body, "status");
+            if (raw_status.has_value() && trim(raw_status.value()) == "none")
+            {
+                const auto raw_key = getObjectString(body, "key");
+                if (!raw_key.has_value() || trim(raw_key.value()).empty())
+                {
+                    return makeJsonResponse(400, makeErrorBody("key is required to remove a withdrawal"));
+                }
+                const std::string key = trim(raw_key.value());
+                std::lock_guard<std::mutex> lock(g_529_mutex);
+                std::vector<ExpenseTags::TagRecord> withdrawals;
+                if (!ExpenseTags::loadTags(k529WithdrawalsFile, withdrawals))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to read 529 withdrawals"));
+                }
+                auto existing = std::find_if(withdrawals.begin(), withdrawals.end(),
+                    [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
+                if (existing == withdrawals.end())
+                {
+                    return makeJsonResponse(404, makeErrorBody("No withdrawal for that key"));
+                }
+                withdrawals.erase(existing);
+                if (!ExpenseTags::saveTags(k529WithdrawalsFile, withdrawals))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to save 529 withdrawals"));
+                }
+                return makeJsonResponse(200, "{\"removed\":true}");
+            }
+
+            const auto raw_date = getObjectString(body, "date");
+            const auto raw_amount = getObjectNumber(body, "amount");
+            const auto raw_notes = getObjectString(body, "notes");
+            if (!raw_date.has_value() || !raw_amount.has_value() || !raw_notes.has_value())
+            {
+                return makeJsonResponse(400, makeErrorBody("date, amount, and notes are required"));
+            }
+            return createManualRecord(k529WithdrawalsFile, g_529_mutex, ensure529Dirs,
+                                      raw_date.value(), raw_amount.value(),
+                                      raw_notes.value(), "529 Plan", "WITHDRAWAL");
+        }
+
         if (request.method == "GET" && request.path == "/api/tax/tags")
         {
             std::lock_guard<std::mutex> lock(g_tax_mutex);
@@ -4839,62 +4971,9 @@ namespace
                 {
                     return makeJsonResponse(400, makeErrorBody("date, amount, and notes are required"));
                 }
-                const time_t entry_date = parseIsoDateUTC(raw_date.value());
-                if (entry_date == 0)
-                {
-                    return makeJsonResponse(400, makeErrorBody("date must be YYYY-MM-DD"));
-                }
-                const double amount = manual_amount.value();
-                if (!(amount > 0.0))
-                {
-                    return makeJsonResponse(400, makeErrorBody("amount must be > 0"));
-                }
-                const std::string notes = trim(raw_notes.value());
-                if (notes.empty())
-                {
-                    return makeJsonResponse(400, makeErrorBody("notes must not be empty"));
-                }
-
-                std::lock_guard<std::mutex> lock(g_tax_mutex);
-                if (!ensureTaxDirs())
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to create data/tax"));
-                }
-                std::vector<ExpenseTags::TagRecord> tags;
-                if (!ExpenseTags::loadTags(kTaxIncomeTagsFile, tags))
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
-                }
-
-                const time_t now = std::time(nullptr);
-                std::string manual_key;
-                int suffix = 0;
-                do
-                {
-                    manual_key = "manual-" + std::to_string(static_cast<long long>(now)) +
-                                 "-" + std::to_string(suffix++);
-                } while (std::any_of(tags.begin(), tags.end(),
-                         [&manual_key](const ExpenseTags::TagRecord& t)
-                         {
-                             return t.key == manual_key;
-                         }));
-
-                ExpenseTags::TagRecord record;
-                record.key = manual_key;
-                record.status = "qualified";
-                record.qualified_amount = amount;
-                record.account = "Manual";
-                record.date = entry_date;
-                record.amount = amount;
-                record.notes = notes;
-                record.category = "MANUAL";
-                record.created = now;
-                tags.push_back(record);
-                if (!ExpenseTags::saveTags(kTaxIncomeTagsFile, tags))
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to save tax tags"));
-                }
-                return makeJsonResponse(201, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
+                return createManualRecord(kTaxIncomeTagsFile, g_tax_mutex, ensureTaxDirs,
+                                          raw_date.value(), manual_amount.value(),
+                                          raw_notes.value(), "Manual", "MANUAL");
             }
 
             const auto raw_kind = getObjectString(body, "kind");
