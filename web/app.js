@@ -3206,11 +3206,12 @@ function renderSpendDrilldownTable(transactions) {
         <td>${escapeHtml(merchant)}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td class="num">${currency(tx.amount)}</td>
+        <td><button class="ghost-btn drilldown-529-btn" type="button" data-key="${escapeHtml(tx.key)}">529</button></td>
       </tr>`;
     })
     .join("");
   return `<table class="tx-table">
-    <thead><tr><th>Date</th><th>Merchant</th><th>Account</th><th class="num">Amount</th></tr></thead>
+    <thead><tr><th>Date</th><th>Merchant</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
@@ -3223,6 +3224,16 @@ function openSpendCategoryDrilldown(primary) {
   const heading = el.transactionsDialog.querySelector("h3");
   if (heading) heading.textContent = `${spendCategoryLabel(primary)} — ${matching.length} transaction${matching.length === 1 ? "" : "s"}`;
   el.transactionsHistory.innerHTML = `<div class="dialog-table-wrap">${renderSpendDrilldownTable(matching)}</div>`;
+  el.transactionsHistory.querySelectorAll(".drilldown-529-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = (state.spend.transactions || []).find((t) => t.key === btn.dataset.key);
+      if (tx) {
+        el.transactionsDialog.close();
+        setSpendTab("529");
+        openQualify529Dialog(tx);
+      }
+    });
+  });
   el.transactionsDialog.showModal();
 }
 
@@ -3419,12 +3430,135 @@ function render529QualifiedList(qualified, txByKey) {
 }
 
 function wire529QualifiedListEvents(host) {
-  // handlers attached in Tasks 9 and 10
+  host.querySelectorAll(".qualified-amount-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const value = Number.parseFloat(input.value);
+      const tag = state.spend.tags529[input.dataset.key];
+      if (!tag) return;
+      if (!Number.isFinite(value) || value <= 0 || value > tag.amount + 0.005) {
+        showFlash("Qualified amount must be between $0.01 and the charge amount.");
+        input.value = (tag.qualified_amount || 0).toFixed(2);
+        return;
+      }
+      try {
+        await saveTag529(input.dataset.key, "qualified", value);
+      } catch (e) {
+        showFlash(`Update failed: ${e.message}`);
+      }
+    });
+  });
+  host.querySelectorAll(".untag-529-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await saveTag529(btn.dataset.key, "none", null);
+      } catch (e) {
+        showFlash(`Untag failed: ${e.message}`);
+      }
+    });
+  });
+  // receipt upload/delete handlers attach in Task 10
 }
 
 function render529Queue(txByKey) {
-  // implemented in Task 9
+  const host = document.getElementById("review529Table");
+  if (!host) return;
+  const queue = (state.spend.transactions || [])
+    .filter((tx) =>
+      tx.account_type === "DEBT" &&
+      isCandidate529Category(tx.category) &&
+      !state.spend.tags529[tx.key])
+    .sort((a, b) => (b.date || 0) - (a.date || 0));
+
+  if (queue.length === 0) {
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem 0;">Queue is clear — nothing to review in this range.</p>`;
+    return;
+  }
+  const rows = queue
+    .map((tx) => `<tr data-key="${escapeHtml(tx.key)}">
+      <td>${dateLabel(tx.date)}</td>
+      <td>${escapeHtml(tx.notes || "—")}</td>
+      <td><span class="chip chip-category ${categoryChipClass(categoryPrimary(tx.category) || "OTHER")}">${escapeHtml(spendCategoryLabel(categoryPrimary(tx.category) || "OTHER"))}</span></td>
+      <td class="num">${currency(tx.amount)}</td>
+      <td>
+        <button class="ghost-btn qualify-529-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Qualify</button>
+        <button class="ghost-btn dismiss-529-btn" type="button" data-key="${escapeHtml(tx.key)}">✕ Dismiss</button>
+      </td>
+    </tr>`)
+    .join("");
+  host.innerHTML = `<table class="tx-table">
+    <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="num">Amount</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+
+  host.querySelectorAll(".qualify-529-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = (state.spend.transactions || []).find((t) => t.key === btn.dataset.key);
+      if (tx) openQualify529Dialog(tx);
+    });
+  });
+  host.querySelectorAll(".dismiss-529-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await saveTag529(btn.dataset.key, "dismissed", null);
+      } catch (e) {
+        showFlash(`Dismiss failed: ${e.message}`);
+      }
+    });
+  });
 }
+
+let qualify529Target = null;
+
+function openQualify529Dialog(tx) {
+  qualify529Target = tx;
+  const dialog = document.getElementById("qualify529Dialog");
+  const merchant = document.getElementById("qualify529Merchant");
+  const amount = document.getElementById("qualify529Amount");
+  const files = document.getElementById("qualify529Files");
+  if (!dialog || !amount) return;
+  if (merchant) merchant.textContent = `${tx.notes || "—"} · ${dateLabel(tx.date)} · ${currency(tx.amount)}`;
+  amount.value = tx.amount.toFixed(2);
+  amount.max = tx.amount;
+  if (files) files.value = "";
+  dialog.showModal();
+}
+
+function wireQualify529Dialog() {
+  const dialog = document.getElementById("qualify529Dialog");
+  const cancel = document.getElementById("qualify529Cancel");
+  const save = document.getElementById("qualify529Save");
+  if (cancel) cancel.addEventListener("click", () => dialog.close());
+  if (save) {
+    save.addEventListener("click", async () => {
+      if (!qualify529Target) return;
+      const amountInput = document.getElementById("qualify529Amount");
+      const filesInput = document.getElementById("qualify529Files");
+      const qualifiedAmount = Number.parseFloat(amountInput.value);
+      if (!Number.isFinite(qualifiedAmount) || qualifiedAmount <= 0 ||
+          qualifiedAmount > qualify529Target.amount + 0.005) {
+        showFlash("Qualified amount must be between $0.01 and the charge amount.");
+        return;
+      }
+      save.disabled = true;
+      try {
+        await saveTag529(qualify529Target.key, "qualified", qualifiedAmount);
+        const files = filesInput ? Array.from(filesInput.files) : [];
+        for (const file of files) {
+          await apiUploadReceipt(qualify529Target.key, file); // Task 10
+        }
+        if (files.length > 0) await refresh529Tags();
+        dialog.close();
+      } catch (e) {
+        showFlash(`Qualify failed: ${e.message}`);
+      } finally {
+        save.disabled = false;
+      }
+    });
+  }
+}
+
+// Temporary stub — Task 10 replaces this with the real receipt upload implementation
+async function apiUploadReceipt() {}
 
 function showSpendAnalysis() {
   stopLiveRefreshTimer();
@@ -3903,6 +4037,7 @@ function wireEvents() {
   const spendTab529 = document.getElementById("spendTab529");
   if (spendTabAnalysis) spendTabAnalysis.addEventListener("click", () => setSpendTab("analysis"));
   if (spendTab529) spendTab529.addEventListener("click", () => setSpendTab("529"));
+  wireQualify529Dialog();
   const spendBucketSelect = document.getElementById("spendBucketSelect");
   if (spendBucketSelect) {
     spendBucketSelect.addEventListener("change", (event) => {
