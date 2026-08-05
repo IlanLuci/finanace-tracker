@@ -3579,6 +3579,158 @@ namespace
         return out.str();
     }
 
+    HttpResponse handleReceiptRoute(const HttpRequest& request, const char* tags_file, const char* receipts_dir, std::mutex& store_mutex)
+    {
+        const auto query_values = parseQuery(request.query);
+        const auto key_it = query_values.find("key");
+        const auto filename_it = query_values.find("filename");
+        if (key_it == query_values.end() || key_it->second.empty() ||
+            filename_it == query_values.end() || filename_it->second.empty())
+        {
+            return makeJsonResponse(400, makeErrorBody("key and filename query params are required"));
+        }
+        const std::string key = key_it->second;
+        // The key itself lands in a filesystem path — restrict it hard.
+        if (key.find_first_not_of("0123456789abcdef-") != std::string::npos)
+        {
+            return makeJsonResponse(400, makeErrorBody("Invalid key"));
+        }
+        const std::string safe_name = ExpenseTags::sanitizeFilename(filename_it->second);
+        if (safe_name.empty())
+        {
+            return makeJsonResponse(400, makeErrorBody("Unusable filename"));
+        }
+        if (!ExpenseTags::isAllowedReceiptExtension(safe_name))
+        {
+            return makeJsonResponse(400, makeErrorBody("Only jpg, jpeg, png, heic, webp, pdf receipts are allowed"));
+        }
+
+        const std::filesystem::path receipt_dir = std::filesystem::path(receipts_dir) / key;
+
+        if (request.method == "POST")
+        {
+            if (request.body.empty())
+            {
+                return makeJsonResponse(400, makeErrorBody("Empty upload"));
+            }
+            if (request.body.size() > 25ULL * 1024 * 1024)
+            {
+                return makeJsonResponse(413, makeErrorBody("Receipt too large (25 MB max)"));
+            }
+
+            std::lock_guard<std::mutex> lock(store_mutex);
+            std::vector<ExpenseTags::TagRecord> tags;
+            if (!ExpenseTags::loadTags(tags_file, tags))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+            }
+            auto tag = std::find_if(tags.begin(), tags.end(),
+                [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
+            if (tag == tags.end() || tag->status != "qualified")
+            {
+                return makeJsonResponse(404, makeErrorBody("Qualify the charge before attaching receipts"));
+            }
+
+            std::error_code ec;
+            std::filesystem::create_directories(receipt_dir, ec);
+            if (ec)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to create receipt directory"));
+            }
+
+            // Dedupe: receipt.jpg -> receipt-2.jpg -> receipt-3.jpg ...
+            std::string stored_name = safe_name;
+            const size_t dot = safe_name.find_last_of('.');
+            const std::string stem = safe_name.substr(0, dot);
+            const std::string ext = safe_name.substr(dot); // includes '.'
+            int suffix = 2;
+            while (std::filesystem::exists(receipt_dir / stored_name))
+            {
+                stored_name = stem + "-" + std::to_string(suffix++) + ext;
+            }
+
+            const std::filesystem::path final_path = receipt_dir / stored_name;
+            const std::filesystem::path temp_path = receipt_dir / (stored_name + ".tmp");
+            {
+                std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
+                if (!file.is_open())
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to write receipt"));
+                }
+                file.write(request.body.data(), static_cast<std::streamsize>(request.body.size()));
+                if (!file.good())
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to write receipt"));
+                }
+            }
+            std::filesystem::rename(temp_path, final_path, ec);
+            if (ec)
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to finalize receipt"));
+            }
+
+            tag->receipts.push_back(stored_name);
+            if (!ExpenseTags::saveTags(tags_file, tags))
+            {
+                // Don't orphan the file: no tag record references it and it
+                // would shift future dedup suffixes. Best-effort removal.
+                std::filesystem::remove(final_path, ec);
+                return makeJsonResponse(500, makeErrorBody("Receipt stored but tag update failed"));
+            }
+            return makeJsonResponse(201, std::string("{\"filename\":") + jsonString(stored_name) + "}");
+        }
+
+        if (request.method == "GET")
+        {
+            std::ifstream file(receipt_dir / safe_name, std::ios::binary);
+            if (!file.is_open())
+            {
+                return makeJsonResponse(404, makeErrorBody("Receipt not found"));
+            }
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            HttpResponse response;
+            response.status = 200;
+            response.content_type = ExpenseTags::receiptMimeType(safe_name);
+            response.body = buffer.str();
+            return response;
+        }
+
+        if (request.method == "DELETE")
+        {
+            std::lock_guard<std::mutex> lock(store_mutex);
+            std::vector<ExpenseTags::TagRecord> tags;
+            if (!ExpenseTags::loadTags(tags_file, tags))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+            }
+            std::error_code ec;
+            const bool file_removed = std::filesystem::remove(receipt_dir / safe_name, ec);
+            bool record_removed = false;
+            auto tag = std::find_if(tags.begin(), tags.end(),
+                [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
+            if (tag != tags.end())
+            {
+                const size_t before = tag->receipts.size();
+                tag->receipts.erase(
+                    std::remove(tag->receipts.begin(), tag->receipts.end(), safe_name),
+                    tag->receipts.end());
+                record_removed = tag->receipts.size() != before;
+                if (record_removed && !ExpenseTags::saveTags(tags_file, tags))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to save 529 tags"));
+                }
+            }
+            if (!file_removed && !record_removed)
+            {
+                return makeJsonResponse(404, makeErrorBody("Receipt not found"));
+            }
+            return makeJsonResponse(200, "{\"removed\":true}");
+        }
+
+        return makeJsonResponse(405, makeErrorBody("Method not allowed"));
+    }
+
     // Collect lowercased + normalized institution names from every connected
     // portfolio so syncCashAccount can decide whether a Plaid TRANSFER is
     // between the user's own connected accounts vs a peer-to-peer payment.
@@ -4533,154 +4685,7 @@ namespace
 
         if (request.path == "/api/529/receipt")
         {
-            const auto query_values = parseQuery(request.query);
-            const auto key_it = query_values.find("key");
-            const auto filename_it = query_values.find("filename");
-            if (key_it == query_values.end() || key_it->second.empty() ||
-                filename_it == query_values.end() || filename_it->second.empty())
-            {
-                return makeJsonResponse(400, makeErrorBody("key and filename query params are required"));
-            }
-            const std::string key = key_it->second;
-            // The key itself lands in a filesystem path — restrict it hard.
-            if (key.find_first_not_of("0123456789abcdef-") != std::string::npos)
-            {
-                return makeJsonResponse(400, makeErrorBody("Invalid key"));
-            }
-            const std::string safe_name = ExpenseTags::sanitizeFilename(filename_it->second);
-            if (safe_name.empty())
-            {
-                return makeJsonResponse(400, makeErrorBody("Unusable filename"));
-            }
-            if (!ExpenseTags::isAllowedReceiptExtension(safe_name))
-            {
-                return makeJsonResponse(400, makeErrorBody("Only jpg, jpeg, png, heic, webp, pdf receipts are allowed"));
-            }
-
-            const std::filesystem::path receipt_dir = std::filesystem::path(kReceiptsDir) / key;
-
-            if (request.method == "POST")
-            {
-                if (request.body.empty())
-                {
-                    return makeJsonResponse(400, makeErrorBody("Empty upload"));
-                }
-                if (request.body.size() > 25ULL * 1024 * 1024)
-                {
-                    return makeJsonResponse(413, makeErrorBody("Receipt too large (25 MB max)"));
-                }
-
-                std::lock_guard<std::mutex> lock(g_529_mutex);
-                std::vector<ExpenseTags::TagRecord> tags;
-                if (!ExpenseTags::loadTags(kTagsFile, tags))
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
-                }
-                auto tag = std::find_if(tags.begin(), tags.end(),
-                    [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
-                if (tag == tags.end() || tag->status != "qualified")
-                {
-                    return makeJsonResponse(404, makeErrorBody("Qualify the charge before attaching receipts"));
-                }
-
-                std::error_code ec;
-                std::filesystem::create_directories(receipt_dir, ec);
-                if (ec)
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to create receipt directory"));
-                }
-
-                // Dedupe: receipt.jpg -> receipt-2.jpg -> receipt-3.jpg ...
-                std::string stored_name = safe_name;
-                const size_t dot = safe_name.find_last_of('.');
-                const std::string stem = safe_name.substr(0, dot);
-                const std::string ext = safe_name.substr(dot); // includes '.'
-                int suffix = 2;
-                while (std::filesystem::exists(receipt_dir / stored_name))
-                {
-                    stored_name = stem + "-" + std::to_string(suffix++) + ext;
-                }
-
-                const std::filesystem::path final_path = receipt_dir / stored_name;
-                const std::filesystem::path temp_path = receipt_dir / (stored_name + ".tmp");
-                {
-                    std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
-                    if (!file.is_open())
-                    {
-                        return makeJsonResponse(500, makeErrorBody("Failed to write receipt"));
-                    }
-                    file.write(request.body.data(), static_cast<std::streamsize>(request.body.size()));
-                    if (!file.good())
-                    {
-                        return makeJsonResponse(500, makeErrorBody("Failed to write receipt"));
-                    }
-                }
-                std::filesystem::rename(temp_path, final_path, ec);
-                if (ec)
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to finalize receipt"));
-                }
-
-                tag->receipts.push_back(stored_name);
-                if (!ExpenseTags::saveTags(kTagsFile, tags))
-                {
-                    // Don't orphan the file: no tag record references it and it
-                    // would shift future dedup suffixes. Best-effort removal.
-                    std::filesystem::remove(final_path, ec);
-                    return makeJsonResponse(500, makeErrorBody("Receipt stored but tag update failed"));
-                }
-                return makeJsonResponse(201, std::string("{\"filename\":") + jsonString(stored_name) + "}");
-            }
-
-            if (request.method == "GET")
-            {
-                std::ifstream file(receipt_dir / safe_name, std::ios::binary);
-                if (!file.is_open())
-                {
-                    return makeJsonResponse(404, makeErrorBody("Receipt not found"));
-                }
-                std::ostringstream buffer;
-                buffer << file.rdbuf();
-                HttpResponse response;
-                response.status = 200;
-                response.content_type = ExpenseTags::receiptMimeType(safe_name);
-                response.body = buffer.str();
-                return response;
-            }
-
-            if (request.method == "DELETE")
-            {
-                std::lock_guard<std::mutex> lock(g_529_mutex);
-                std::vector<ExpenseTags::TagRecord> tags;
-                if (!ExpenseTags::loadTags(kTagsFile, tags))
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
-                }
-                std::error_code ec;
-                const bool file_removed = std::filesystem::remove(receipt_dir / safe_name, ec);
-                bool record_removed = false;
-                auto tag = std::find_if(tags.begin(), tags.end(),
-                    [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
-                if (tag != tags.end())
-                {
-                    const size_t before = tag->receipts.size();
-                    tag->receipts.erase(
-                        std::remove(tag->receipts.begin(), tag->receipts.end(), safe_name),
-                        tag->receipts.end());
-                    record_removed = tag->receipts.size() != before;
-                    if (record_removed && !ExpenseTags::saveTags(kTagsFile, tags))
-                    {
-                        return makeJsonResponse(500, makeErrorBody("Failed to save 529 tags"));
-                    }
-                }
-                if (!file_removed && !record_removed)
-                {
-                    return makeJsonResponse(404, makeErrorBody("Receipt not found"));
-                }
-                return makeJsonResponse(200, "{\"removed\":true}");
-            }
-
-            return makeJsonResponse(405, makeErrorBody("Method not allowed"));
+            return handleReceiptRoute(request, kTagsFile, kReceiptsDir, g_529_mutex);
         }
 
         if (request.method == "GET" && request.path == "/api/529/export.csv")
