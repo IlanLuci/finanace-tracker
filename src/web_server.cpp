@@ -3226,6 +3226,7 @@ namespace
     {
         std::string match_lower; // case-insensitive substring on tx notes
         std::string category;    // PFC string to substitute (detailed or primary_*)
+        std::string display;     // optional display name override (empty = no rename)
     };
 
     // Load merchant-name → category overrides from data/spend_overrides.json.
@@ -3249,13 +3250,22 @@ namespace
         {
             if (el.type != JsonType::OBJECT) continue;
             auto m_it = el.object_value.find("match");
-            auto c_it = el.object_value.find("category");
-            if (m_it == el.object_value.end() || c_it == el.object_value.end()) continue;
-            if (m_it->second.type != JsonType::STRING || c_it->second.type != JsonType::STRING) continue;
+            if (m_it == el.object_value.end() || m_it->second.type != JsonType::STRING) continue;
             SpendOverride rule;
             rule.match_lower = lowerCopy(m_it->second.string_value);
-            rule.category = c_it->second.string_value;
-            if (!rule.match_lower.empty() && !rule.category.empty()) rules.push_back(rule);
+            if (rule.match_lower.empty()) continue;
+            auto c_it = el.object_value.find("category");
+            if (c_it != el.object_value.end() && c_it->second.type == JsonType::STRING)
+            {
+                rule.category = c_it->second.string_value;
+            }
+            auto d_it = el.object_value.find("display");
+            if (d_it != el.object_value.end() && d_it->second.type == JsonType::STRING)
+            {
+                rule.display = d_it->second.string_value;
+            }
+            if (rule.category.empty() && rule.display.empty()) continue;
+            rules.push_back(rule);
         }
         return rules;
     }
@@ -3312,6 +3322,7 @@ namespace
                 if (tx.date < from || tx.date > to) continue;
 
                 std::string effective_category = tx.category;
+                std::string effective_notes = tx.notes;
                 if (!overrides.empty())
                 {
                     const std::string notes_lower = lowerCopy(tx.notes);
@@ -3319,7 +3330,14 @@ namespace
                     {
                         if (notes_lower.find(rule.match_lower) != std::string::npos)
                         {
-                            effective_category = rule.category;
+                            if (!rule.category.empty())
+                            {
+                                effective_category = rule.category;
+                            }
+                            if (!rule.display.empty())
+                            {
+                                effective_notes = rule.display;
+                            }
                             break;
                         }
                     }
@@ -3330,7 +3348,7 @@ namespace
                 spend_tx.date = tx.date;
                 spend_tx.amount = std::abs(tx.amount);
                 spend_tx.category = effective_category;
-                spend_tx.notes = tx.notes;
+                spend_tx.notes = effective_notes;
                 spend_tx.account = name;
                 spend_tx.account_type = portfolioTypeToString(pt);
                 result.push_back(spend_tx);
@@ -3427,6 +3445,7 @@ namespace
     // a same-tuple deposit/withdrawal collision is harmless.
     std::vector<SpendTxn> collectIncomeTransactions(PortfolioManager& manager, time_t from, time_t to)
     {
+        const std::vector<SpendOverride> overrides = loadSpendOverrides();
         std::vector<SpendTxn> result;
         ExpenseTags::KeyAssigner key_assigner;
 
@@ -3454,12 +3473,34 @@ namespace
 
                 if (tx.date < from || tx.date > to) continue;
 
+                std::string effective_category = tx.category;
+                std::string effective_notes = tx.notes;
+                if (!overrides.empty())
+                {
+                    const std::string notes_lower = lowerCopy(tx.notes);
+                    for (const auto& rule : overrides)
+                    {
+                        if (notes_lower.find(rule.match_lower) != std::string::npos)
+                        {
+                            if (!rule.category.empty())
+                            {
+                                effective_category = rule.category;
+                            }
+                            if (!rule.display.empty())
+                            {
+                                effective_notes = rule.display;
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 SpendTxn income_tx;
                 income_tx.key = key;
                 income_tx.date = tx.date;
                 income_tx.amount = std::abs(tx.amount);
-                income_tx.category = tx.category;
-                income_tx.notes = tx.notes;
+                income_tx.category = effective_category;
+                income_tx.notes = effective_notes;
                 income_tx.account = name;
                 income_tx.account_type = portfolioTypeToString(pt);
                 result.push_back(income_tx);
