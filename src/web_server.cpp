@@ -3689,6 +3689,7 @@ namespace
         if (ec)
         {
             std::cerr << "Backup: failed to finalize " << snapshot << std::endl;
+            std::filesystem::remove(temp_snapshot, ec);
             return;
         }
         std::cout << "Backup: wrote " << snapshot << std::endl;
