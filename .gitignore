@@ -6,5 +6,6 @@ recompute_daily_values
 data/
 
 test_persistence
+test_529
 .env
 /tools/__pycache__
