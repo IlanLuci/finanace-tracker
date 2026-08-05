@@ -770,6 +770,7 @@ function renderOfflineBanner() {
 const PROGRESS_BAR_SHOW_DELAY_MS = 250;
 let inFlightRequests = 0;
 let progressShowTimer = null;
+let withdrawals529Loading = false;
 
 function showProgressBar() {
   const bar = document.getElementById("globalProgressBar");
@@ -3479,12 +3480,16 @@ async function refresh529Tags() {
 }
 
 async function loadWithdrawals529() {
+  if (withdrawals529Loading) return;
+  withdrawals529Loading = true;
   try {
     const payload = await apiGet("/api/529/withdrawals");
     state.spend529.withdrawals = Array.isArray(payload.withdrawals) ? payload.withdrawals : [];
     render529Reconciliation();
   } catch (e) {
     showFlash(`Failed to load 529 withdrawals: ${e.message}`);
+  } finally {
+    withdrawals529Loading = false;
   }
 }
 
@@ -3945,9 +3950,8 @@ function render529QualifiedList(qualified, txByKey) {
       const orphaned = !txByKey[tag.key];
       const receipts = (tag.receipts || [])
         .map((name) =>
-          `<a class="receipt-chip" target="_blank"
-              href="${escapeHtml(apiUrl(`/api/529/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`))}"
-           >${escapeHtml(name)}</a>
+          `<button class="receipt-chip" type="button" data-key="${escapeHtml(tag.key)}"
+                   data-filename="${escapeHtml(name)}">${escapeHtml(name)}</button>
            <button class="receipt-delete" type="button" data-key="${escapeHtml(tag.key)}"
                    data-filename="${escapeHtml(name)}" title="Delete receipt">×</button>`)
         .join(" ");
@@ -4013,6 +4017,31 @@ function wire529QualifiedListEvents(host) {
       fileInput.dataset.key = btn.dataset.key;
       fileInput.value = "";
       fileInput.click();
+    });
+  });
+  host.querySelectorAll(".receipt-chip").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      beginRequest();
+      try {
+        const response = await fetch(
+          apiUrl(`/api/529/receipt?key=${encodeURIComponent(btn.dataset.key)}&filename=${encodeURIComponent(btn.dataset.filename)}`),
+          { headers: authHeaders() }
+        );
+        if (!response.ok) {
+          let message = `Receipt load failed: ${response.status}`;
+          try { message = (await response.json()).error || message; } catch (_) { /* non-JSON */ }
+          showFlash(message);
+          return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        window.open(url, "_blank");
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch (e) {
+        showFlash(`Receipt load failed: ${e.message}`);
+      } finally {
+        endRequest();
+      }
     });
   });
   host.querySelectorAll(".receipt-delete").forEach((btn) => {

@@ -3245,9 +3245,9 @@ namespace
         std::string display;     // optional display name override (empty = no rename)
     };
 
-    // Load merchant-name → category overrides from data/spend_overrides.json.
+    // Load merchant-name → category and display-name overrides from data/spend_overrides.json.
     // Plaid's auto-classification is wrong for some recurring merchants — this
-    // lets the user pin them to the right primary without editing tx history.
+    // lets the user pin them to the right primary or rename them without editing tx history.
     // Returns an empty vector silently if the file is missing or malformed.
     std::vector<SpendOverride> loadSpendOverrides()
     {

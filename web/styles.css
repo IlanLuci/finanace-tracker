@@ -1244,6 +1244,9 @@ small {
   background: rgba(34, 34, 34, 0.08);
   font-size: 0.8rem;
   text-decoration: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
 }
 
 .receipt-delete {
