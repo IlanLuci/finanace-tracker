@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="styles.css?v=20260805b" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260805f" defer></script>
+  <script src="app.js?v=20260805g" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -276,7 +276,7 @@
     <h3 id="qualify529Title">Qualify for 529</h3>
     <p id="qualify529Merchant" class="muted-note"></p>
     <label>
-      Qualified amount
+      <span id="qualify529AmountLabel">Qualified amount</span>
       <input id="qualify529Amount" type="number" step="0.01" min="0.01" inputmode="decimal" />
     </label>
     <label id="qualify529FilesWrap">

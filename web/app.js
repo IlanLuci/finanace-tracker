@@ -3484,8 +3484,10 @@ function taxYearBounds() {
   return { from: `${y}-01-01`, to: `${y}-12-31` };
 }
 
+let taxLoadSeq = 0;
+
 async function loadTaxData() {
-  if (state.tax.loading) return;
+  const seq = ++taxLoadSeq;
   state.tax.loading = true;
   try {
     const { from, to } = taxYearBounds();
@@ -3494,6 +3496,7 @@ async function loadTaxData() {
       apiGet(`/api/income?from=${from}&to=${to}`),
       apiGet("/api/tax/tags")
     ]);
+    if (seq !== taxLoadSeq) return;
     state.tax.spendTxs = Array.isArray(spendPayload.transactions) ? spendPayload.transactions : [];
     state.tax.incomeTxs = Array.isArray(incomePayload.transactions) ? incomePayload.transactions : [];
     state.tax.tags = { income: {}, deductions: {} };
@@ -3507,7 +3510,7 @@ async function loadTaxData() {
   } catch (e) {
     showFlash(`Failed to load tax data: ${e.message}`);
   } finally {
-    state.tax.loading = false;
+    if (seq === taxLoadSeq) state.tax.loading = false;
   }
 }
 
@@ -3672,10 +3675,13 @@ function wireTaxMarkedListEvents(host) {
   });
   host.querySelectorAll(".tax-unmark-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      btn.disabled = true;
       try {
         await saveTaxTag(btn.dataset.kind, btn.dataset.key, "none", null);
       } catch (e) {
         showFlash(`Unmark failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
       }
     });
   });
@@ -3926,10 +3932,13 @@ function wire529QualifiedListEvents(host) {
   });
   host.querySelectorAll(".untag-529-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      btn.disabled = true;
       try {
         await saveTag529(btn.dataset.key, "none", null);
       } catch (e) {
         showFlash(`Untag failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
       }
     });
   });
@@ -4029,9 +4038,9 @@ let qualify529Target = null;
 let markDialogMode = "529";
 
 const MARK_DIALOG_COPY = {
-  "529": { title: "Qualify for 529", verb: "Qualify", showFiles: true },
-  "income": { title: "Mark taxable income", verb: "Mark", showFiles: false },
-  "deduction": { title: "Mark tax deductible", verb: "Mark", showFiles: true }
+  "529": { title: "Qualify for 529", verb: "Qualify", showFiles: true, amountLabel: "Qualified amount" },
+  "income": { title: "Mark taxable income", verb: "Mark", showFiles: false, amountLabel: "Taxable amount" },
+  "deduction": { title: "Mark tax deductible", verb: "Mark", showFiles: true, amountLabel: "Deductible amount" }
 };
 
 function openMarkDialog(mode, tx) {
@@ -4051,6 +4060,8 @@ function openMarkDialog(mode, tx) {
   amount.max = tx.amount;
   if (files) files.value = "";
   if (filesWrap) filesWrap.hidden = !copy.showFiles;
+  const amountLabel = document.getElementById("qualify529AmountLabel");
+  if (amountLabel) amountLabel.textContent = copy.amountLabel;
   dialog.showModal();
 }
 
