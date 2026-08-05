@@ -3511,6 +3511,113 @@ namespace
         return !ec;
     }
 
+    const char* kTaxIncomeTagsFile = "data/tax/income.json";
+    const char* kTaxDeductionTagsFile = "data/tax/deductions.json";
+    const char* kTaxReceiptsDir = "data/tax/receipts";
+    std::mutex g_tax_mutex;
+
+    bool ensureTaxDirs()
+    {
+        std::error_code ec;
+        std::filesystem::create_directories("data/tax", ec);
+        std::filesystem::create_directories(kTaxReceiptsDir, ec);
+        return !ec;
+    }
+
+    HttpResponse applyTagUpsert(const std::string& key, const std::string& status,
+                                std::optional<double> amount_opt,
+                                const char* tags_file, std::mutex& store_mutex,
+                                bool (*ensure_dirs)(), PortfolioManager& manager,
+                                std::vector<SpendTxn> (*collect)(PortfolioManager&, time_t, time_t))
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        if (!ensure_dirs())
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to create data directory"));
+        }
+        std::vector<ExpenseTags::TagRecord> tags;
+        if (!ExpenseTags::loadTags(tags_file, tags))
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to read tags"));
+        }
+
+        auto existing = std::find_if(tags.begin(), tags.end(),
+            [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
+
+        if (status == "none")
+        {
+            if (existing == tags.end())
+            {
+                return makeJsonResponse(404, makeErrorBody("No tag for that key"));
+            }
+            // Receipt files stay on disk (spec: only explicit DELETE removes them).
+            tags.erase(existing);
+            if (!ExpenseTags::saveTags(tags_file, tags))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to save tags"));
+            }
+            return makeJsonResponse(200, "{\"removed\":true}");
+        }
+
+        ExpenseTags::TagRecord record;
+        if (existing != tags.end())
+        {
+            record = *existing;
+        }
+        else
+        {
+            // New tag: capture denormalized source fields from transaction data.
+            const time_t now = std::time(nullptr);
+            const std::vector<SpendTxn> all = collect(manager, 0, now + 86400);
+            auto txn = std::find_if(all.begin(), all.end(),
+                [&key](const SpendTxn& t) { return t.key == key; });
+            if (txn == all.end())
+            {
+                return makeJsonResponse(404, makeErrorBody("Transaction not found for that key"));
+            }
+            record.key = key;
+            record.account = txn->account;
+            record.date = txn->date;
+            record.amount = txn->amount;
+            record.notes = txn->notes;
+            record.category = txn->category;
+            record.created = now;
+        }
+
+        record.status = status;
+        if (status == "qualified")
+        {
+            double qualified_amount = record.amount; // default: full charge
+            if (amount_opt.has_value())
+            {
+                qualified_amount = amount_opt.value();
+            }
+            if (!(qualified_amount > 0.0) || qualified_amount > record.amount + 0.005)
+            {
+                return makeJsonResponse(400, makeErrorBody("qualified_amount must be > 0 and <= the charge amount"));
+            }
+            record.qualified_amount = qualified_amount;
+        }
+        else
+        {
+            record.qualified_amount = 0.0;
+        }
+
+        if (existing != tags.end())
+        {
+            *existing = record;
+        }
+        else
+        {
+            tags.push_back(record);
+        }
+        if (!ExpenseTags::saveTags(tags_file, tags))
+        {
+            return makeJsonResponse(500, makeErrorBody("Failed to save tags"));
+        }
+        return makeJsonResponse(200, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
+    }
+
     std::string csvField(const std::string& value)
     {
         // Prefix formula-injection characters so Excel/Sheets don't execute
@@ -4593,94 +4700,69 @@ namespace
             {
                 return makeJsonResponse(400, makeErrorBody("status must be qualified, dismissed, or none"));
             }
+            const auto raw_amount = getObjectNumber(body, "qualified_amount");
+            return applyTagUpsert(key, status, raw_amount, kTagsFile, g_529_mutex,
+                                  ensure529Dirs, manager, collectSpendTransactions);
+        }
 
-            std::lock_guard<std::mutex> lock(g_529_mutex);
-            if (!ensure529Dirs())
+        if (request.method == "GET" && request.path == "/api/tax/tags")
+        {
+            std::lock_guard<std::mutex> lock(g_tax_mutex);
+            std::vector<ExpenseTags::TagRecord> income_tags;
+            std::vector<ExpenseTags::TagRecord> deduction_tags;
+            if (!ExpenseTags::loadTags(kTaxIncomeTagsFile, income_tags) ||
+                !ExpenseTags::loadTags(kTaxDeductionTagsFile, deduction_tags))
             {
-                return makeJsonResponse(500, makeErrorBody("Failed to create data/529"));
+                return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
             }
-            std::vector<ExpenseTags::TagRecord> tags;
-            if (!ExpenseTags::loadTags(kTagsFile, tags))
+            std::ostringstream out;
+            out << "{\"income\":[";
+            for (size_t i = 0; i < income_tags.size(); ++i)
             {
-                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+                if (i > 0) out << ",";
+                out << serializeTagRecord(income_tags[i]);
             }
+            out << "],\"deductions\":[";
+            for (size_t i = 0; i < deduction_tags.size(); ++i)
+            {
+                if (i > 0) out << ",";
+                out << serializeTagRecord(deduction_tags[i]);
+            }
+            out << "]}";
+            return makeJsonResponse(200, out.str());
+        }
 
-            auto existing = std::find_if(tags.begin(), tags.end(),
-                [&key](const ExpenseTags::TagRecord& t) { return t.key == key; });
-
-            if (status == "none")
+        if (request.method == "POST" && request.path == "/api/tax/tag")
+        {
+            JsonValue body;
+            HttpResponse parse_error = parseJsonBodyObject(request, body);
+            if (parse_error.status != 200)
             {
-                if (existing == tags.end())
-                {
-                    return makeJsonResponse(404, makeErrorBody("No 529 tag for that key"));
-                }
-                // Receipt files stay on disk (spec: only explicit DELETE removes them).
-                tags.erase(existing);
-                if (!ExpenseTags::saveTags(kTagsFile, tags))
-                {
-                    return makeJsonResponse(500, makeErrorBody("Failed to save 529 tags"));
-                }
-                return makeJsonResponse(200, "{\"removed\":true}");
+                return parse_error;
             }
-
-            ExpenseTags::TagRecord record;
-            if (existing != tags.end())
+            const auto raw_kind = getObjectString(body, "kind");
+            const auto raw_key = getObjectString(body, "key");
+            const auto raw_status = getObjectString(body, "status");
+            if (!raw_kind.has_value() || !raw_key.has_value() || !raw_status.has_value())
             {
-                record = *existing;
+                return makeJsonResponse(400, makeErrorBody("kind, key, and status are required"));
             }
-            else
+            const std::string kind = trim(raw_kind.value());
+            const std::string key = trim(raw_key.value());
+            const std::string status = trim(raw_status.value());
+            if (kind != "income" && kind != "deduction")
             {
-                // New tag: capture denormalized source fields from spend data.
-                const time_t now = std::time(nullptr);
-                const std::vector<SpendTxn> all = collectSpendTransactions(manager, 0, now + 86400);
-                auto txn = std::find_if(all.begin(), all.end(),
-                    [&key](const SpendTxn& t) { return t.key == key; });
-                if (txn == all.end())
-                {
-                    return makeJsonResponse(404, makeErrorBody("Transaction not found for that key"));
-                }
-                record.key = key;
-                record.account = txn->account;
-                record.date = txn->date;
-                record.amount = txn->amount;
-                record.notes = txn->notes;
-                record.category = txn->category;
-                record.created = now;
+                return makeJsonResponse(400, makeErrorBody("kind must be income or deduction"));
             }
-
-            record.status = status;
-            if (status == "qualified")
+            if (status != "qualified" && status != "dismissed" && status != "none")
             {
-                double qualified_amount = record.amount; // default: full charge
-                const auto raw_amount = getObjectNumber(body, "qualified_amount");
-                if (raw_amount.has_value())
-                {
-                    qualified_amount = raw_amount.value();
-                }
-                if (!(qualified_amount > 0.0) || qualified_amount > record.amount + 0.005)
-                {
-                    return makeJsonResponse(400, makeErrorBody("qualified_amount must be > 0 and <= the charge amount"));
-                }
-                record.qualified_amount = qualified_amount;
+                return makeJsonResponse(400, makeErrorBody("status must be qualified, dismissed, or none"));
             }
-            else
-            {
-                record.qualified_amount = 0.0;
-            }
-
-            if (existing != tags.end())
-            {
-                *existing = record;
-            }
-            else
-            {
-                tags.push_back(record);
-            }
-            if (!ExpenseTags::saveTags(kTagsFile, tags))
-            {
-                return makeJsonResponse(500, makeErrorBody("Failed to save 529 tags"));
-            }
-            return makeJsonResponse(200, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
+            const auto raw_amount = getObjectNumber(body, "amount");
+            const char* tags_file = (kind == "income") ? kTaxIncomeTagsFile : kTaxDeductionTagsFile;
+            auto collect = (kind == "income") ? collectIncomeTransactions : collectSpendTransactions;
+            return applyTagUpsert(key, status, raw_amount, tags_file, g_tax_mutex,
+                                  ensureTaxDirs, manager, collect);
         }
 
         if (request.path == "/api/529/receipt")
