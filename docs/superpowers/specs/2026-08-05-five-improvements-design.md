@@ -81,7 +81,8 @@ expenses for tax purposes).
 - CORS: `Access-Control-Allow-Headers` gains `Authorization`; OPTIONS preflight
   (if the server handles it) stays exempt from auth so preflights succeed.
 - **Frontend:** the API Settings panel gains an "API token (optional)" password
-  input stored in localStorage (`ft.apiToken`) beside the base URL; every fetch
+  input stored in localStorage (`portfolio-api-token`, matching the existing
+  `portfolio-api-base` convention) beside the base URL; every fetch
   helper (`apiGet`, `apiGetWithTimeout`, `apiPost`, `apiDelete`, `apiPatch`,
   `apiUploadReceiptTo`, `downloadTaxExport`, `download529Export`) attaches the
   header when a token is stored. A 401 response flashes a hint to check the token.
