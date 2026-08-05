@@ -288,7 +288,9 @@ const state = {
     range: localStorage.getItem("ft.spend.range") || "3M",
     customFrom: localStorage.getItem("ft.spend.customFrom") || "",
     customTo: localStorage.getItem("ft.spend.customTo") || "",
-    loading: false
+    loading: false,
+    tab: "analysis",
+    tags529: {}
   },
   stocksSort: { key: null, dir: null },
   allTransactions: {},
@@ -1906,7 +1908,7 @@ function renderDashboard() {
         <h3>Accounts</h3>
         <div class="chart-tools">
           ${filterMarkup}
-          <button id="openSpendAnalysisBtn" class="ghost-btn" type="button">Spend Analysis</button>
+          <button id="openSpendAnalysisBtn" class="ghost-btn" type="button">Spending</button>
           <button id="openPortfolioCreateDialogBtn" class="primary-btn" type="button">New Account</button>
         </div>
       </div>
@@ -3278,6 +3280,23 @@ async function loadSpendData() {
   }
 }
 
+function setSpendTab(tab) {
+  state.spend.tab = tab;
+  const analysisPane = document.getElementById("spendAnalysisPane");
+  const pane529 = document.getElementById("spend529Pane");
+  const analysisBtn = document.getElementById("spendTabAnalysis");
+  const btn529 = document.getElementById("spendTab529");
+  if (analysisPane) analysisPane.hidden = tab !== "analysis";
+  if (pane529) pane529.hidden = tab !== "529";
+  if (analysisBtn) analysisBtn.classList.toggle("is-active", tab === "analysis");
+  if (btn529) btn529.classList.toggle("is-active", tab === "529");
+  if (tab === "529") render529Tab();
+}
+
+function render529Tab() {
+  // populated in Task 8
+}
+
 function showSpendAnalysis() {
   stopLiveRefreshTimer();
   stopDashboardLiveRefreshTimer();
@@ -3286,7 +3305,7 @@ function showSpendAnalysis() {
   setActiveView("spend");
   setBreadcrumbs([
     { label: "Assets", onClick: showDashboard },
-    { label: "Spend Analysis" }
+    { label: "Spending" }
   ]);
 
   const bucketSelect = document.getElementById("spendBucketSelect");
@@ -3751,6 +3770,10 @@ function wireEvents() {
 
   const backFromSpend = document.getElementById("backToDashFromSpendBtn");
   if (backFromSpend) backFromSpend.addEventListener("click", showDashboard);
+  const spendTabAnalysis = document.getElementById("spendTabAnalysis");
+  const spendTab529 = document.getElementById("spendTab529");
+  if (spendTabAnalysis) spendTabAnalysis.addEventListener("click", () => setSpendTab("analysis"));
+  if (spendTab529) spendTab529.addEventListener("click", () => setSpendTab("529"));
   const spendBucketSelect = document.getElementById("spendBucketSelect");
   if (spendBucketSelect) {
     spendBucketSelect.addEventListener("change", (event) => {

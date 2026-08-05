@@ -1209,3 +1209,24 @@ small {
   color: var(--muted);
   font-size: 10pt;
 }
+
+.spend-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.spend-tab {
+  padding: 0.45rem 1rem;
+  border: 1px solid rgba(34, 34, 34, 0.15);
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.spend-tab.is-active {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}

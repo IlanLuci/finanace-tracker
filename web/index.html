@@ -7,10 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20260602a" />
+  <link rel="stylesheet" href="styles.css?v=20260805a" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260630a" defer></script>
+  <script src="app.js?v=20260805a" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -54,53 +54,88 @@
         <div class="page-head">
           <div>
             <p class="eyebrow">Analytics</p>
-            <h2>Spend Analysis</h2>
+            <h2>Spending</h2>
           </div>
           <div class="page-head-actions">
             <button id="backToDashFromSpendBtn" class="ghost-btn" type="button">Back to Dashboard</button>
           </div>
         </div>
 
-        <article class="panel chart-panel">
-          <div class="panel-head">
-            <h3 id="spendTotalLabel">Total spend</h3>
-            <div class="chart-tools">
-              <select id="spendBucketSelect" class="graph-period-select" aria-label="Bucket">
-                <option value="weekly">Weekly</option>
-                <option value="monthly" selected>Monthly</option>
-              </select>
-              <select id="spendRangeSelect" class="graph-period-select" aria-label="Range">
-                <option value="1M">1M</option>
-                <option value="3M" selected>3M</option>
-                <option value="6M">6M</option>
-                <option value="1Y">1Y</option>
-                <option value="YTD">YTD</option>
-                <option value="ALL">ALL</option>
-                <option value="CUSTOM">Custom…</option>
-              </select>
-              <span id="spendCustomRangeWrap" class="spend-custom-range" hidden>
-                <input id="spendCustomFrom" type="date" aria-label="From" />
-                <span class="spend-custom-sep">→</span>
-                <input id="spendCustomTo" type="date" aria-label="To" />
-              </span>
+        <div class="spend-tabs" role="tablist">
+          <button id="spendTabAnalysis" class="spend-tab is-active" type="button" role="tab">Analysis</button>
+          <button id="spendTab529" class="spend-tab" type="button" role="tab">529 Expenses</button>
+        </div>
+
+        <div id="spendAnalysisPane">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <h3 id="spendTotalLabel">Total spend</h3>
+              <div class="chart-tools">
+                <select id="spendBucketSelect" class="graph-period-select" aria-label="Bucket">
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly" selected>Monthly</option>
+                </select>
+                <select id="spendRangeSelect" class="graph-period-select" aria-label="Range">
+                  <option value="1M">1M</option>
+                  <option value="3M" selected>3M</option>
+                  <option value="6M">6M</option>
+                  <option value="1Y">1Y</option>
+                  <option value="YTD">YTD</option>
+                  <option value="ALL">ALL</option>
+                  <option value="CUSTOM">Custom…</option>
+                </select>
+                <span id="spendCustomRangeWrap" class="spend-custom-range" hidden>
+                  <input id="spendCustomFrom" type="date" aria-label="From" />
+                  <span class="spend-custom-sep">→</span>
+                  <input id="spendCustomTo" type="date" aria-label="To" />
+                </span>
+              </div>
             </div>
-          </div>
-          <canvas id="spendBarChart" aria-label="Spend by category"></canvas>
-        </article>
+            <canvas id="spendBarChart" aria-label="Spend by category"></canvas>
+          </article>
 
-        <article class="panel allocation-panel">
-          <div class="panel-head">
-            <h3>Category Breakdown</h3>
-          </div>
-          <canvas id="spendPieChart" aria-label="Spend category share"></canvas>
-        </article>
+          <article class="panel allocation-panel">
+            <div class="panel-head">
+              <h3>Category Breakdown</h3>
+            </div>
+            <canvas id="spendPieChart" aria-label="Spend category share"></canvas>
+          </article>
 
-        <article class="panel">
-          <div class="panel-head">
-            <h3>By Category</h3>
-          </div>
-          <div id="spendCategoryTable" class="stocks-table-wrap"></div>
-        </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h3>By Category</h3>
+            </div>
+            <div id="spendCategoryTable" class="stocks-table-wrap"></div>
+          </article>
+        </div>
+
+        <div id="spend529Pane" hidden>
+          <article class="panel">
+            <div class="panel-head">
+              <h3 id="total529Label">529 qualified total</h3>
+              <div class="chart-tools">
+                <button id="export529CsvBtn" class="ghost-btn" type="button">Export CSV</button>
+                <button id="export529ZipBtn" class="ghost-btn" type="button">Export ZIP</button>
+              </div>
+            </div>
+            <p id="summary529Meta" class="muted-note"></p>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Review Queue</h3>
+              <p class="muted-note">Credit-card charges in grocery, food, and school-supply categories</p>
+            </div>
+            <div id="review529Table" class="stocks-table-wrap"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Qualified Expenses</h3>
+            </div>
+            <div id="qualified529Table" class="stocks-table-wrap"></div>
+          </article>
+        </div>
       </section>
 
       <section id="portfolioView" class="view" hidden>
@@ -178,6 +213,23 @@
       <button class="ghost-btn" value="cancel">Close</button>
     </form>
     <div id="transactionsHistory"></div>
+  </dialog>
+
+  <dialog id="qualify529Dialog" class="dialog">
+    <h3>Qualify for 529</h3>
+    <p id="qualify529Merchant" class="muted-note"></p>
+    <label>
+      Qualified amount
+      <input id="qualify529Amount" type="number" step="0.01" min="0.01" inputmode="decimal" />
+    </label>
+    <label>
+      Receipts (optional)
+      <input id="qualify529Files" type="file" accept="image/*,.pdf,.heic" multiple />
+    </label>
+    <div class="dialog-actions">
+      <button id="qualify529Cancel" class="ghost-btn" type="button">Cancel</button>
+      <button id="qualify529Save" class="primary-btn" type="button">Save</button>
+    </div>
   </dialog>
 
   <dialog id="transactionDialog" class="dialog">
