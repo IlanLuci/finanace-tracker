@@ -3614,12 +3614,12 @@ namespace
         std::lock_guard<std::mutex> lock(store_mutex);
         if (!ensure_dirs())
         {
-            return makeJsonResponse(500, makeErrorBody("Failed to create data/tax"));
+            return makeJsonResponse(500, makeErrorBody("Failed to create data directory"));
         }
         std::vector<ExpenseTags::TagRecord> tags;
         if (!ExpenseTags::loadTags(tags_file, tags))
         {
-            return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
+            return makeJsonResponse(500, makeErrorBody("Failed to read records"));
         }
 
         const time_t now = std::time(nullptr);
@@ -3648,7 +3648,7 @@ namespace
         tags.push_back(record);
         if (!ExpenseTags::saveTags(tags_file, tags))
         {
-            return makeJsonResponse(500, makeErrorBody("Failed to save tax tags"));
+            return makeJsonResponse(500, makeErrorBody("Failed to save records"));
         }
         return makeJsonResponse(201, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
     }
