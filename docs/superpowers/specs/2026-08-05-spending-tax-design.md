@@ -24,6 +24,15 @@ transaction fingerprint keys, review workflow) shipped earlier today — see
   - **REMOVED (2026-08-05, post-v1, user decision):** deduction receipts dropped
     entirely — no receipts UI on the Tax tab, `/api/tax/receipt` route deleted,
     deductions CSV no longer has a receipts column. 529 receipts are unaffected.
+- **Manual income entries (added 2026-08-05, post-v1):** Plaid history doesn't
+  reach before each account's sync start (earliest: 2026-03-02), so pre-sync or
+  off-platform income can be added manually: "＋ Add income manually" on the
+  Marked Taxable Income panel → date/amount/description → POST `/api/tax/tag`
+  with `{manual:true, kind:"income", date, amount, notes}`. Creates a
+  self-contained record (key `manual-<epoch>-<n>`, account "Manual", category
+  "MANUAL") that flows through totals/exports via its own denormalized fields.
+  Renders with a "manual" chip instead of the orphaned badge; unmark/amount-edit
+  work like any record. Income only.
 - **Total scope:** the Tax tab has its own tax-year dropdown (calendar year; current +
   3 prior years), independent of the page's date-range selector.
 - **Amounts:** editable — marking defaults to the full transaction amount, editable

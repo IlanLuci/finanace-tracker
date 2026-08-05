@@ -3585,10 +3585,14 @@ function renderTaxMarkedIncome(marked, txByKey) {
   }
   const rows = marked
     .map((tag) => {
-      const orphaned = !txByKey[tag.key];
+      const manual = tag.key.startsWith("manual-");
+      const orphaned = !manual && !txByKey[tag.key];
+      const badge = manual
+        ? ` <span class="chip chip-neutral">manual</span>`
+        : (orphaned ? ` <span class="orphaned-badge" title="No longer in income data">orphaned</span>` : "");
       return `<tr data-key="${escapeHtml(tag.key)}">
         <td>${dateLabel(tag.date)}</td>
-        <td>${escapeHtml(tag.notes || "—")}${orphaned ? ` <span class="orphaned-badge" title="No longer in income data">orphaned</span>` : ""}</td>
+        <td>${escapeHtml(tag.notes || "—")}${badge}</td>
         <td class="num">${currency(tag.amount)}</td>
         <td class="num">
           <input class="tax-amount-input num" type="number" step="0.01" min="0.01"
@@ -4078,6 +4082,54 @@ function wireTaxStaticControls() {
       state.tax.year = Number.parseInt(yearSelect.value, 10);
       loadTaxData();
     });
+  }
+  const addManualBtn = document.getElementById("addManualIncomeBtn");
+  const manualDialog = document.getElementById("manualIncomeDialog");
+  if (addManualBtn && manualDialog) {
+    addManualBtn.addEventListener("click", () => {
+      const dateInput = document.getElementById("manualIncomeDate");
+      const amountInput = document.getElementById("manualIncomeAmount");
+      const notesInput = document.getElementById("manualIncomeNotes");
+      if (dateInput && !dateInput.value) {
+        const now = new Date();
+        dateInput.value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      }
+      if (amountInput) amountInput.value = "";
+      if (notesInput) notesInput.value = "";
+      manualDialog.showModal();
+    });
+    const manualCancel = document.getElementById("manualIncomeCancel");
+    if (manualCancel) manualCancel.addEventListener("click", () => manualDialog.close());
+    const manualSave = document.getElementById("manualIncomeSave");
+    if (manualSave) {
+      manualSave.addEventListener("click", async () => {
+        const date = document.getElementById("manualIncomeDate").value;
+        const amount = Number.parseFloat(document.getElementById("manualIncomeAmount").value);
+        const notes = document.getElementById("manualIncomeNotes").value.trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          showFlash("Pick a date for the income entry.");
+          return;
+        }
+        if (!Number.isFinite(amount) || amount <= 0) {
+          showFlash("Amount must be greater than $0.");
+          return;
+        }
+        if (!notes) {
+          showFlash("Add a short description.");
+          return;
+        }
+        manualSave.disabled = true;
+        try {
+          await apiPost("/api/tax/tag", { kind: "income", manual: true, date, amount, notes });
+          await refreshTaxTags();
+          manualDialog.close();
+        } catch (e) {
+          showFlash(`Add income failed: ${e.message}`);
+        } finally {
+          manualSave.disabled = false;
+        }
+      });
+    }
   }
   const depositsSearch = document.getElementById("taxDepositsSearch");
   if (depositsSearch) {

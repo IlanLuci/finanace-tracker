@@ -4775,6 +4775,87 @@ namespace
             {
                 return parse_error;
             }
+            // Manual income entries: pre-sync or off-platform income with no
+            // Plaid transaction to key against. Creates a self-contained
+            // record whose synthetic "manual-" key never matches a synced
+            // transaction; totals/exports read the record's own fields so it
+            // flows through everything downstream unchanged.
+            const auto manual_it = body.object_value.find("manual");
+            const bool is_manual = manual_it != body.object_value.end() &&
+                                   manual_it->second.type == JsonType::BOOL &&
+                                   manual_it->second.bool_value;
+            if (is_manual)
+            {
+                const auto manual_kind = getObjectString(body, "kind");
+                if (!manual_kind.has_value() || trim(manual_kind.value()) != "income")
+                {
+                    return makeJsonResponse(400, makeErrorBody("manual entries support kind income only"));
+                }
+                const auto raw_date = getObjectString(body, "date");
+                const auto manual_amount = getObjectNumber(body, "amount");
+                const auto raw_notes = getObjectString(body, "notes");
+                if (!raw_date.has_value() || !manual_amount.has_value() || !raw_notes.has_value())
+                {
+                    return makeJsonResponse(400, makeErrorBody("date, amount, and notes are required"));
+                }
+                const time_t entry_date = parseIsoDateUTC(raw_date.value());
+                if (entry_date == 0)
+                {
+                    return makeJsonResponse(400, makeErrorBody("date must be YYYY-MM-DD"));
+                }
+                const double amount = manual_amount.value();
+                if (!(amount > 0.0))
+                {
+                    return makeJsonResponse(400, makeErrorBody("amount must be > 0"));
+                }
+                const std::string notes = trim(raw_notes.value());
+                if (notes.empty())
+                {
+                    return makeJsonResponse(400, makeErrorBody("notes must not be empty"));
+                }
+
+                std::lock_guard<std::mutex> lock(g_tax_mutex);
+                if (!ensureTaxDirs())
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to create data/tax"));
+                }
+                std::vector<ExpenseTags::TagRecord> tags;
+                if (!ExpenseTags::loadTags(kTaxIncomeTagsFile, tags))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to read tax tags"));
+                }
+
+                const time_t now = std::time(nullptr);
+                std::string manual_key;
+                int suffix = 0;
+                do
+                {
+                    manual_key = "manual-" + std::to_string(static_cast<long long>(now)) +
+                                 "-" + std::to_string(suffix++);
+                } while (std::any_of(tags.begin(), tags.end(),
+                         [&manual_key](const ExpenseTags::TagRecord& t)
+                         {
+                             return t.key == manual_key;
+                         }));
+
+                ExpenseTags::TagRecord record;
+                record.key = manual_key;
+                record.status = "qualified";
+                record.qualified_amount = amount;
+                record.account = "Manual";
+                record.date = entry_date;
+                record.amount = amount;
+                record.notes = notes;
+                record.category = "MANUAL";
+                record.created = now;
+                tags.push_back(record);
+                if (!ExpenseTags::saveTags(kTaxIncomeTagsFile, tags))
+                {
+                    return makeJsonResponse(500, makeErrorBody("Failed to save tax tags"));
+                }
+                return makeJsonResponse(201, std::string("{\"tag\":") + serializeTagRecord(record) + "}");
+            }
+
             const auto raw_kind = getObjectString(body, "kind");
             const auto raw_key = getObjectString(body, "key");
             const auto raw_status = getObjectString(body, "status");
