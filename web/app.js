@@ -3554,7 +3554,6 @@ function renderTaxTab() {
 
   const incomeTotal = markedIncome.reduce((sum, t) => sum + (t.qualified_amount || 0), 0);
   const deductionTotal = markedDeductions.reduce((sum, t) => sum + (t.qualified_amount || 0), 0);
-  const missingReceipts = markedDeductions.filter((t) => (t.receipts || []).length === 0).length;
 
   const incomeSummary = document.getElementById("taxSummaryIncome");
   if (incomeSummary) {
@@ -3562,10 +3561,7 @@ function renderTaxTab() {
   }
   const deductionSummary = document.getElementById("taxSummaryDeductions");
   if (deductionSummary) {
-    const missingNote = missingReceipts > 0
-      ? ` · ⚠ ${missingReceipts} missing receipt${missingReceipts === 1 ? "" : "s"}`
-      : "";
-    deductionSummary.textContent = `Deductible: ${currency(deductionTotal)} · ${markedDeductions.length} marked${missingNote}`;
+    deductionSummary.textContent = `Deductible: ${currency(deductionTotal)} · ${markedDeductions.length} marked`;
   }
 
   const incomeTxByKey = {};
@@ -3620,16 +3616,6 @@ function renderTaxMarkedDeductions(marked, txByKey) {
   const rows = marked
     .map((tag) => {
       const orphaned = !txByKey[tag.key];
-      const receipts = (tag.receipts || [])
-        .map((name) =>
-          `<a class="receipt-chip" target="_blank"
-              href="${escapeHtml(apiUrl(`/api/tax/receipt?key=${encodeURIComponent(tag.key)}&filename=${encodeURIComponent(name)}`))}"
-           >${escapeHtml(name)}</a>
-           <button class="tax-receipt-delete" type="button" data-key="${escapeHtml(tag.key)}"
-                   data-filename="${escapeHtml(name)}" title="Delete receipt">×</button>`)
-        .join(" ");
-      const receiptCell = receipts ||
-        `<span class="missing-receipt-badge">⚠ no receipt</span>`;
       return `<tr data-key="${escapeHtml(tag.key)}">
         <td>${dateLabel(tag.date)}</td>
         <td>${escapeHtml(tag.notes || "—")}${orphaned ? ` <span class="orphaned-badge" title="No longer in spend data">orphaned</span>` : ""}</td>
@@ -3639,15 +3625,12 @@ function renderTaxMarkedDeductions(marked, txByKey) {
                  max="${Number.isFinite(tag.amount) ? tag.amount : 0}" value="${(tag.qualified_amount || 0).toFixed(2)}"
                  data-key="${escapeHtml(tag.key)}" data-kind="deduction" aria-label="Deductible amount" />
         </td>
-        <td class="receipt-cell">${receiptCell}
-          <button class="ghost-btn tax-receipt-upload-btn" type="button" data-key="${escapeHtml(tag.key)}">＋ Receipt</button>
-        </td>
         <td><button class="ghost-btn tax-unmark-btn" type="button" data-key="${escapeHtml(tag.key)}" data-kind="deduction">Unmark</button></td>
       </tr>`;
     })
     .join("");
   host.innerHTML = `<table class="tx-table">
-    <thead><tr><th>Date</th><th>Merchant</th><th class="num">Charge</th><th class="num">Deductible</th><th>Receipts</th><th></th></tr></thead>
+    <thead><tr><th>Date</th><th>Merchant</th><th class="num">Charge</th><th class="num">Deductible</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
   wireTaxMarkedListEvents(host);
@@ -3685,51 +3668,6 @@ function wireTaxMarkedListEvents(host) {
       }
     });
   });
-  host.querySelectorAll(".tax-receipt-upload-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const fileInput = document.getElementById("receiptTaxFileInput");
-      if (!fileInput) return;
-      fileInput.dataset.key = btn.dataset.key;
-      fileInput.value = "";
-      fileInput.click();
-    });
-  });
-  host.querySelectorAll(".tax-receipt-delete").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await apiDelete(`/api/tax/receipt?key=${encodeURIComponent(btn.dataset.key)}&filename=${encodeURIComponent(btn.dataset.filename)}`);
-        await refreshTaxTags();
-      } catch (e) {
-        showFlash(`Delete failed: ${e.message}`);
-      }
-    });
-  });
-  // Receipts only exist for deductions — dropping a file on an income row
-  // would hit /api/tax/receipt with an income key and the server would 404.
-  if (host.id === "taxMarkedDeductionsTable") {
-    host.querySelectorAll("tr[data-key]").forEach((row) => {
-      row.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        row.classList.add("receipt-drop-active");
-      });
-      row.addEventListener("dragleave", () => row.classList.remove("receipt-drop-active"));
-      row.addEventListener("drop", async (event) => {
-        event.preventDefault();
-        row.classList.remove("receipt-drop-active");
-        const files = Array.from(event.dataTransfer?.files || []);
-        if (files.length === 0) return;
-        try {
-          for (const file of files) {
-            await apiUploadReceiptTo("/api/tax/receipt", row.dataset.key, file);
-          }
-        } catch (e) {
-          showFlash(`Upload failed: ${e.message}`);
-        } finally {
-          await refreshTaxTags();
-        }
-      });
-    });
-  }
 }
 
 function renderTaxIncomeQueue(incomeTxByKey) {
@@ -4040,7 +3978,7 @@ let markDialogMode = "529";
 const MARK_DIALOG_COPY = {
   "529": { title: "Qualify for 529", verb: "Qualify", showFiles: true, amountLabel: "Qualified amount" },
   "income": { title: "Mark taxable income", verb: "Mark", showFiles: false, amountLabel: "Taxable amount" },
-  "deduction": { title: "Mark tax deductible", verb: "Mark", showFiles: true, amountLabel: "Deductible amount" }
+  "deduction": { title: "Mark tax deductible", verb: "Mark", showFiles: false, amountLabel: "Deductible amount" }
 };
 
 function openMarkDialog(mode, tx) {
@@ -4113,19 +4051,7 @@ function wireQualify529Dialog() {
           await saveTaxTag("income", key, "qualified", qualifiedAmount);
           dialog.close();
         } else {
-          const files = filesInput ? Array.from(filesInput.files) : [];
-          if (files.length > 0) {
-            await saveTaxTag("deduction", key, "qualified", qualifiedAmount, false);
-            try {
-              for (const file of files) {
-                await apiUploadReceiptTo("/api/tax/receipt", key, file);
-              }
-            } finally {
-              await refreshTaxTags();
-            }
-          } else {
-            await saveTaxTag("deduction", key, "qualified", qualifiedAmount);
-          }
+          await saveTaxTag("deduction", key, "qualified", qualifiedAmount);
           dialog.close();
         }
       } catch (e) {
@@ -4151,23 +4077,6 @@ function wireTaxStaticControls() {
     yearSelect.addEventListener("change", () => {
       state.tax.year = Number.parseInt(yearSelect.value, 10);
       loadTaxData();
-    });
-  }
-  const receiptInput = document.getElementById("receiptTaxFileInput");
-  if (receiptInput) {
-    receiptInput.addEventListener("change", async () => {
-      const key = receiptInput.dataset.key;
-      const files = Array.from(receiptInput.files);
-      if (!key || files.length === 0) return;
-      try {
-        for (const file of files) {
-          await apiUploadReceiptTo("/api/tax/receipt", key, file);
-        }
-      } catch (e) {
-        showFlash(`Upload failed: ${e.message}`);
-      } finally {
-        await refreshTaxTags();
-      }
     });
   }
   const depositsSearch = document.getElementById("taxDepositsSearch");

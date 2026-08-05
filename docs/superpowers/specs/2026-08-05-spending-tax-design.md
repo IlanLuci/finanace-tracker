@@ -21,6 +21,9 @@ transaction fingerprint keys, review workflow) shipped earlier today — see
   Tax tab.
 - **Receipts:** deductions only (charity letters, invoices). Income marks carry no
   files.
+  - **REMOVED (2026-08-05, post-v1, user decision):** deduction receipts dropped
+    entirely — no receipts UI on the Tax tab, `/api/tax/receipt` route deleted,
+    deductions CSV no longer has a receipts column. 529 receipts are unaffected.
 - **Total scope:** the Tax tab has its own tax-year dropdown (calendar year; current +
   3 prior years), independent of the page's date-range selector.
 - **Amounts:** editable — marking defaults to the full transaction amount, editable

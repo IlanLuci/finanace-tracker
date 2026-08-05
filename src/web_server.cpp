@@ -4805,13 +4805,6 @@ namespace
             return handleReceiptRoute(request, kTagsFile, kReceiptsDir, g_529_mutex);
         }
 
-        if (request.path == "/api/tax/receipt")
-        {
-            // Deduction receipts only: the store handed to the helper is the
-            // deductions file, so income marks can never accept uploads.
-            return handleReceiptRoute(request, kTaxDeductionTagsFile, kTaxReceiptsDir, g_tax_mutex);
-        }
-
         if (request.method == "GET" &&
             (request.path == "/api/tax/export/income.csv" ||
              request.path == "/api/tax/export/deductions.csv"))
@@ -4837,7 +4830,7 @@ namespace
             response.content_type = "text/csv; charset=utf-8";
             response.body = is_income
                 ? buildTagCsv(tags, "date,account,source,category,deposit_amount,taxable_amount\r\n", false)
-                : buildTagCsv(tags, "date,account,merchant,category,charge_amount,deductible_amount,receipts\r\n", true);
+                : buildTagCsv(tags, "date,account,merchant,category,charge_amount,deductible_amount\r\n", false);
             return response;
         }
 
