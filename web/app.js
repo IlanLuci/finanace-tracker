@@ -3328,12 +3328,16 @@ function spendRangeBounds() {
 }
 
 async function refresh529Tags() {
-  const tagsPayload = await apiGet("/api/529/tags");
-  state.spend.tags529 = {};
-  (Array.isArray(tagsPayload.tags) ? tagsPayload.tags : []).forEach((tag) => {
-    state.spend.tags529[tag.key] = tag;
-  });
-  render529Tab();
+  try {
+    const tagsPayload = await apiGet("/api/529/tags");
+    state.spend.tags529 = {};
+    (Array.isArray(tagsPayload.tags) ? tagsPayload.tags : []).forEach((tag) => {
+      state.spend.tags529[tag.key] = tag;
+    });
+    render529Tab();
+  } catch (e) {
+    showFlash(`Failed to refresh 529 tags: ${e.message}`);
+  }
 }
 
 async function saveTag529(key, status, qualifiedAmount) {
@@ -3397,7 +3401,7 @@ function render529QualifiedList(qualified, txByKey) {
         <td class="num">${currency(tag.amount)}</td>
         <td class="num">
           <input class="qualified-amount-input num" type="number" step="0.01" min="0.01"
-                 max="${tag.amount}" value="${(tag.qualified_amount || 0).toFixed(2)}"
+                 max="${Number.isFinite(tag.amount) ? tag.amount : 0}" value="${(tag.qualified_amount || 0).toFixed(2)}"
                  data-key="${escapeHtml(tag.key)}" aria-label="Qualified amount" />
         </td>
         <td class="receipt-cell">${receiptCell}
