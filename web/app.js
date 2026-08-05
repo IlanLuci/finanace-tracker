@@ -3351,13 +3351,13 @@ async function refresh529Tags() {
   }
 }
 
-async function saveTag529(key, status, qualifiedAmount) {
+async function saveTag529(key, status, qualifiedAmount, refresh = true) {
   const body = { key, status };
   if (status === "qualified" && qualifiedAmount != null) {
     body.qualified_amount = qualifiedAmount;
   }
   await apiPost("/api/529/tag", body);
-  await refresh529Tags();
+  if (refresh) await refresh529Tags();
 }
 
 function render529Tab() {
@@ -3525,8 +3525,10 @@ function openQualify529Dialog(tx) {
 
 function wireQualify529Dialog() {
   const dialog = document.getElementById("qualify529Dialog");
+  if (!dialog) return;
   const cancel = document.getElementById("qualify529Cancel");
   const save = document.getElementById("qualify529Save");
+  dialog.addEventListener("close", () => { qualify529Target = null; });
   if (cancel) cancel.addEventListener("click", () => dialog.close());
   if (save) {
     save.addEventListener("click", async () => {
@@ -3541,12 +3543,16 @@ function wireQualify529Dialog() {
       }
       save.disabled = true;
       try {
-        await saveTag529(qualify529Target.key, "qualified", qualifiedAmount);
         const files = filesInput ? Array.from(filesInput.files) : [];
-        for (const file of files) {
-          await apiUploadReceipt(qualify529Target.key, file); // Task 10
+        if (files.length > 0) {
+          await saveTag529(qualify529Target.key, "qualified", qualifiedAmount, false);
+          for (const file of files) {
+            await apiUploadReceipt(qualify529Target.key, file); // Task 10
+          }
+          await refresh529Tags();
+        } else {
+          await saveTag529(qualify529Target.key, "qualified", qualifiedAmount);
         }
-        if (files.length > 0) await refresh529Tags();
         dialog.close();
       } catch (e) {
         showFlash(`Qualify failed: ${e.message}`);
