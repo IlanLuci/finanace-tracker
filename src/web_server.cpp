@@ -1,5 +1,6 @@
 #include "web_server.hpp"
 
+#include "expense_tags.hpp"
 #include "market_data_sync.hpp"
 #include "plaid_client.hpp"
 #include "portfolio_data.hpp"
@@ -3256,73 +3257,102 @@ namespace
     // Excludes inter-account transfers (notes prefixed "[TXFR]" by syncCashAccount)
     // and Plaid TRANSFER_*/LOAN_PAYMENTS categories — paying down a credit card is
     // not spend, it just shifts the liability.
-    std::string buildSpendJson(PortfolioManager& manager, time_t from, time_t to)
+    struct SpendTxn
+    {
+        std::string key;
+        time_t date;
+        double amount;            // positive spend amount
+        std::string category;     // effective category (after spend_overrides)
+        std::string notes;
+        std::string account;
+        std::string account_type; // "CASH" | "DEBT"
+    };
+
+    std::vector<SpendTxn> collectSpendTransactions(PortfolioManager& manager, time_t from, time_t to)
     {
         const std::vector<SpendOverride> overrides = loadSpendOverrides();
+        std::vector<SpendTxn> result;
+        ExpenseTags::KeyAssigner key_assigner;
+
+        if (!manager.scanPortfolios())
+        {
+            return result;
+        }
+
+        const std::vector<std::string> names = manager.getPortfolioNames();
+        for (const std::string& name : names)
+        {
+            Portfolio portfolio;
+            if (!loadPortfolioCached(manager, name, portfolio)) continue;
+            const PortfolioType pt = portfolio.getType();
+            if (pt != PortfolioType::CASH && pt != PortfolioType::DEBT) continue;
+
+            for (const Transaction& tx : portfolio.getTransactions())
+            {
+                if (tx.type != TransactionType::WITHDRAWAL) continue;
+                if (notesIsPending(tx.notes)) continue;
+                if (notesStartsWithTxfr(tx.notes)) continue;
+
+                const std::string upper_cat = upperCopy(tx.category);
+                if (upper_cat.rfind("TRANSFER_IN", 0) == 0) continue;
+                if (upper_cat.rfind("TRANSFER_OUT", 0) == 0) continue;
+                if (upper_cat.rfind("LOAN_PAYMENTS", 0) == 0) continue;
+
+                // Key BEFORE the range filter: occurrence indices must be
+                // stable across different requested ranges.
+                const std::string key = key_assigner.next(name, tx.date, tx.amount, tx.notes);
+
+                if (tx.date < from || tx.date > to) continue;
+
+                std::string effective_category = tx.category;
+                if (!overrides.empty())
+                {
+                    const std::string notes_lower = lowerCopy(tx.notes);
+                    for (const auto& rule : overrides)
+                    {
+                        if (notes_lower.find(rule.match_lower) != std::string::npos)
+                        {
+                            effective_category = rule.category;
+                            break;
+                        }
+                    }
+                }
+
+                SpendTxn spend_tx;
+                spend_tx.key = key;
+                spend_tx.date = tx.date;
+                spend_tx.amount = std::abs(tx.amount);
+                spend_tx.category = effective_category;
+                spend_tx.notes = tx.notes;
+                spend_tx.account = name;
+                spend_tx.account_type = portfolioTypeToString(pt);
+                result.push_back(spend_tx);
+            }
+        }
+        return result;
+    }
+
+    std::string buildSpendJson(PortfolioManager& manager, time_t from, time_t to)
+    {
+        const std::vector<SpendTxn> txs = collectSpendTransactions(manager, from, to);
         std::ostringstream out;
         out << "{"
             << "\"from\":" << static_cast<long long>(from) << ","
             << "\"to\":" << static_cast<long long>(to) << ","
             << "\"transactions\":[";
-        bool first = true;
-
-        if (manager.scanPortfolios())
+        for (size_t i = 0; i < txs.size(); ++i)
         {
-            const std::vector<std::string> names = manager.getPortfolioNames();
-            for (const std::string& name : names)
-            {
-                Portfolio portfolio;
-                if (!loadPortfolioCached(manager, name, portfolio)) continue;
-                const PortfolioType pt = portfolio.getType();
-                if (pt != PortfolioType::CASH && pt != PortfolioType::DEBT) continue;
-
-                for (const Transaction& tx : portfolio.getTransactions())
-                {
-                    if (tx.type != TransactionType::WITHDRAWAL) continue;
-                    if (tx.date < from || tx.date > to) continue;
-
-                    // Pending Plaid txs can change (amount/category) or get
-                    // reversed before posting, so they shouldn't influence the
-                    // spend totals. They reappear here once they post.
-                    if (notesIsPending(tx.notes)) continue;
-
-                    // Strip inter-account transfers tagged by the sync path.
-                    if (notesStartsWithTxfr(tx.notes)) continue;
-
-                    const std::string upper_cat = upperCopy(tx.category);
-                    if (upper_cat.rfind("TRANSFER_IN", 0) == 0) continue;
-                    if (upper_cat.rfind("TRANSFER_OUT", 0) == 0) continue;
-                    if (upper_cat.rfind("LOAN_PAYMENTS", 0) == 0) continue;
-
-                    if (!first) out << ",";
-                    first = false;
-
-                    std::string effective_category = tx.category;
-                    if (!overrides.empty())
-                    {
-                        const std::string notes_lower = lowerCopy(tx.notes);
-                        for (const auto& rule : overrides)
-                        {
-                            if (notes_lower.find(rule.match_lower) != std::string::npos)
-                            {
-                                effective_category = rule.category;
-                                break;
-                            }
-                        }
-                    }
-
-                    out << "{"
-                        << "\"date\":" << static_cast<long long>(tx.date) << ","
-                        << "\"amount\":" << jsonNumber(std::abs(tx.amount)) << ","
-                        << "\"category\":" << jsonString(effective_category) << ","
-                        << "\"notes\":" << jsonString(tx.notes) << ","
-                        << "\"account\":" << jsonString(name) << ","
-                        << "\"account_type\":" << jsonString(portfolioTypeToString(pt))
-                        << "}";
-                }
-            }
+            if (i > 0) out << ",";
+            out << "{"
+                << "\"key\":" << jsonString(txs[i].key) << ","
+                << "\"date\":" << static_cast<long long>(txs[i].date) << ","
+                << "\"amount\":" << jsonNumber(txs[i].amount) << ","
+                << "\"category\":" << jsonString(txs[i].category) << ","
+                << "\"notes\":" << jsonString(txs[i].notes) << ","
+                << "\"account\":" << jsonString(txs[i].account) << ","
+                << "\"account_type\":" << jsonString(txs[i].account_type)
+                << "}";
         }
-
         out << "]}";
         return out.str();
     }
