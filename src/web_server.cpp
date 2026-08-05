@@ -3364,6 +3364,10 @@ namespace
     // load-modify-save of tags.json and every receipt-dir mutation.
     std::mutex g_529_mutex;
 
+    // Serializes concurrent ZIP exports: they share the staging dir
+    // data/529/.export_tmp.
+    std::mutex g_529_export_mutex;
+
     std::string serializeTagRecord(const ExpenseTags::TagRecord& tag)
     {
         std::ostringstream out;
@@ -4663,13 +4667,10 @@ namespace
                 to = now;
             }
 
-            std::lock_guard<std::mutex> lock(g_529_mutex);
-            bool ok = false;
-            const auto tags = qualifiedTagsInRange(from, to, ok);
-            if (!ok)
-            {
-                return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
-            }
+            // Serialize whole-export against other exports (shared staging
+            // dir), but hold g_529_mutex only while reading tags and copying
+            // receipts — not across the blocking zip subprocess.
+            std::lock_guard<std::mutex> export_lock(g_529_export_mutex);
 
             const std::filesystem::path staging = "data/529/.export_tmp";
             std::error_code ec;
@@ -4681,28 +4682,44 @@ namespace
             }
 
             {
-                std::ofstream csv(staging / "expenses.csv", std::ios::binary);
-                csv << build529Csv(tags);
-            }
-
-            char date_buf[16];
-            for (const auto& tag : tags)
-            {
-                std::tm tm_utc{};
-                gmtime_r(&tag.date, &tm_utc);
-                std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
-                std::string merchant = ExpenseTags::sanitizeFilename(tag.notes);
-                if (merchant.size() > 40) merchant.resize(40);
-                if (merchant.empty()) merchant = "receipt";
-                for (const auto& receipt : tag.receipts)
+                std::lock_guard<std::mutex> lock(g_529_mutex);
+                bool ok = false;
+                const auto tags = qualifiedTagsInRange(from, to, ok);
+                if (!ok)
                 {
-                    const std::filesystem::path src =
-                        std::filesystem::path(kReceiptsDir) / tag.key / receipt;
-                    const std::filesystem::path dst =
-                        staging / (std::string(date_buf) + "_" + merchant + "_" + receipt);
-                    std::filesystem::copy_file(src, dst,
-                        std::filesystem::copy_options::overwrite_existing, ec);
-                    // Missing files are skipped: the CSV still lists the name.
+                    std::filesystem::remove_all(staging, ec);
+                    return makeJsonResponse(500, makeErrorBody("Failed to read 529 tags"));
+                }
+
+                {
+                    std::ofstream csv(staging / "expenses.csv", std::ios::binary);
+                    csv << build529Csv(tags);
+                }
+
+                char date_buf[16];
+                for (const auto& tag : tags)
+                {
+                    std::tm tm_utc{};
+                    gmtime_r(&tag.date, &tm_utc);
+                    std::strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm_utc);
+                    std::string merchant = ExpenseTags::sanitizeFilename(tag.notes);
+                    if (merchant.size() > 40) merchant.resize(40);
+                    if (merchant.empty()) merchant = "receipt";
+                    for (const auto& receipt : tag.receipts)
+                    {
+                        // Stored names are sanitized at upload time; re-run
+                        // sanitizeFilename as defense in depth so a tampered
+                        // tags.json can't inject path components.
+                        const std::string safe_receipt = ExpenseTags::sanitizeFilename(receipt);
+                        if (safe_receipt.empty()) continue;
+                        const std::filesystem::path src =
+                            std::filesystem::path(kReceiptsDir) / tag.key / safe_receipt;
+                        const std::filesystem::path dst =
+                            staging / (std::string(date_buf) + "_" + merchant + "_" + safe_receipt);
+                        std::filesystem::copy_file(src, dst,
+                            std::filesystem::copy_options::overwrite_existing, ec);
+                        // Missing files are skipped: the CSV still lists the name.
+                    }
                 }
             }
 
