@@ -4021,6 +4021,9 @@ function wire529QualifiedListEvents(host) {
   });
   host.querySelectorAll(".receipt-chip").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      // Open the tab synchronously inside the click gesture so Safari's
+      // popup blocker allows it, then navigate it once the blob is ready.
+      const viewer = window.open("about:blank", "_blank");
       beginRequest();
       try {
         const response = await fetch(
@@ -4030,14 +4033,20 @@ function wire529QualifiedListEvents(host) {
         if (!response.ok) {
           let message = `Receipt load failed: ${response.status}`;
           try { message = (await response.json()).error || message; } catch (_) { /* non-JSON */ }
+          if (viewer) viewer.close();
           showFlash(message);
           return;
         }
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
-        window.open(url, "_blank");
+        if (viewer) {
+          viewer.location.href = url;
+        } else {
+          window.open(url, "_blank");
+        }
         setTimeout(() => URL.revokeObjectURL(url), 60000);
       } catch (e) {
+        if (viewer) viewer.close();
         showFlash(`Receipt load failed: ${e.message}`);
       } finally {
         endRequest();
