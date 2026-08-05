@@ -3515,9 +3515,10 @@ function wire529QualifiedListEvents(host) {
         for (const file of files) {
           await apiUploadReceipt(row.dataset.key, file);
         }
-        await refresh529Tags();
       } catch (e) {
         showFlash(`Upload failed: ${e.message}`);
+      } finally {
+        await refresh529Tags();
       }
     });
   });
@@ -3610,10 +3611,13 @@ function wireQualify529Dialog() {
         const files = filesInput ? Array.from(filesInput.files) : [];
         if (files.length > 0) {
           await saveTag529(qualify529Target.key, "qualified", qualifiedAmount, false);
-          for (const file of files) {
-            await apiUploadReceipt(qualify529Target.key, file); // Task 10
+          try {
+            for (const file of files) {
+              await apiUploadReceipt(qualify529Target.key, file);
+            }
+          } finally {
+            await refresh529Tags();
           }
-          await refresh529Tags();
         } else {
           await saveTag529(qualify529Target.key, "qualified", qualifiedAmount);
         }
@@ -3626,7 +3630,6 @@ function wireQualify529Dialog() {
     });
   }
 }
-
 
 function showSpendAnalysis() {
   stopLiveRefreshTimer();
@@ -4116,9 +4119,10 @@ function wireEvents() {
         for (const file of files) {
           await apiUploadReceipt(key, file);
         }
-        await refresh529Tags();
       } catch (e) {
         showFlash(`Upload failed: ${e.message}`);
+      } finally {
+        await refresh529Tags();
       }
     });
   }
