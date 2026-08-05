@@ -1261,3 +1261,8 @@ small {
   font: inherit;
   text-align: right;
 }
+
+.receipt-drop-active {
+  outline: 2px dashed #b3372f;
+  outline-offset: -2px;
+}

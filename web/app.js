@@ -871,6 +871,31 @@ async function apiPost(path, body) {
   }
 }
 
+async function apiUploadReceipt(key, file) {
+  beginRequest();
+  try {
+    const query = `key=${encodeURIComponent(key)}&filename=${encodeURIComponent(file.name)}`;
+    const response = await fetch(apiUrl(`/api/529/receipt?${query}`), {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `Upload failed: ${response.status}`);
+    }
+    return data;
+  } catch (error) {
+    if (isNetworkError(error)) {
+      setOfflineState(true);
+      throw new Error("You're offline — receipts can't upload until you reconnect.");
+    }
+    throw error;
+  } finally {
+    endRequest();
+  }
+}
+
 async function apiDelete(path) {
   beginRequest();
   try {
@@ -3456,7 +3481,46 @@ function wire529QualifiedListEvents(host) {
       }
     });
   });
-  // receipt upload/delete handlers attach in Task 10
+  host.querySelectorAll(".receipt-upload-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const fileInput = document.getElementById("receipt529FileInput");
+      if (!fileInput) return;
+      fileInput.dataset.key = btn.dataset.key;
+      fileInput.value = "";
+      fileInput.click();
+    });
+  });
+  host.querySelectorAll(".receipt-delete").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiDelete(`/api/529/receipt?key=${encodeURIComponent(btn.dataset.key)}&filename=${encodeURIComponent(btn.dataset.filename)}`);
+        await refresh529Tags();
+      } catch (e) {
+        showFlash(`Delete failed: ${e.message}`);
+      }
+    });
+  });
+  host.querySelectorAll("tr[data-key]").forEach((row) => {
+    row.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      row.classList.add("receipt-drop-active");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("receipt-drop-active"));
+    row.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      row.classList.remove("receipt-drop-active");
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (files.length === 0) return;
+      try {
+        for (const file of files) {
+          await apiUploadReceipt(row.dataset.key, file);
+        }
+        await refresh529Tags();
+      } catch (e) {
+        showFlash(`Upload failed: ${e.message}`);
+      }
+    });
+  });
 }
 
 function render529Queue(txByKey) {
@@ -3563,8 +3627,6 @@ function wireQualify529Dialog() {
   }
 }
 
-// Temporary stub — Task 10 replaces this with the real receipt upload implementation
-async function apiUploadReceipt() {}
 
 function showSpendAnalysis() {
   stopLiveRefreshTimer();
@@ -4044,6 +4106,22 @@ function wireEvents() {
   if (spendTabAnalysis) spendTabAnalysis.addEventListener("click", () => setSpendTab("analysis"));
   if (spendTab529) spendTab529.addEventListener("click", () => setSpendTab("529"));
   wireQualify529Dialog();
+  const receiptInput = document.getElementById("receipt529FileInput");
+  if (receiptInput) {
+    receiptInput.addEventListener("change", async () => {
+      const key = receiptInput.dataset.key;
+      const files = Array.from(receiptInput.files);
+      if (!key || files.length === 0) return;
+      try {
+        for (const file of files) {
+          await apiUploadReceipt(key, file);
+        }
+        await refresh529Tags();
+      } catch (e) {
+        showFlash(`Upload failed: ${e.message}`);
+      }
+    });
+  }
   const spendBucketSelect = document.getElementById("spendBucketSelect");
   if (spendBucketSelect) {
     spendBucketSelect.addEventListener("change", (event) => {
