@@ -3200,7 +3200,7 @@ function renderSpendCategoryTable(totals) {
   const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
   const grand = entries.reduce((sum, [, v]) => sum + v, 0);
   if (entries.length === 0) {
-    return `<p class="muted-note" style="padding:0.75rem 0;">No spend in this range.</p>`;
+    return `<p class="muted-note" style="padding:0.75rem;">No spend in this range.</p>`;
   }
   const rows = entries
     .map(([primary, amount]) => {
@@ -3221,7 +3221,7 @@ function renderSpendCategoryTable(totals) {
 
 function renderSpendDrilldownTable(transactions) {
   if (transactions.length === 0) {
-    return `<p class="muted-note" style="padding:0.75rem 0;">No transactions.</p>`;
+    return `<p class="muted-note" style="padding:0.75rem;">No transactions.</p>`;
   }
   const rows = transactions
     .map((tx) => {
@@ -3452,7 +3452,7 @@ function render529QualifiedList(qualified, txByKey) {
   const host = document.getElementById("qualified529Table");
   if (!host) return;
   if (qualified.length === 0) {
-    host.innerHTML = `<p class="muted-note" style="padding:0.75rem 0;">Nothing qualified in this range yet.</p>`;
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">Nothing qualified in this range yet.</p>`;
     return;
   }
   const rows = qualified
@@ -3573,7 +3573,7 @@ function render529Queue(txByKey) {
     .sort((a, b) => (b.date || 0) - (a.date || 0));
 
   if (queue.length === 0) {
-    host.innerHTML = `<p class="muted-note" style="padding:0.75rem 0;">Queue is clear — nothing to review in this range.</p>`;
+    host.innerHTML = `<p class="muted-note" style="padding:0.75rem;">Queue is clear — nothing to review in this range.</p>`;
     return;
   }
   const rows = queue
