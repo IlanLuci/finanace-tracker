@@ -3344,7 +3344,7 @@ async function loadSpendData() {
     });
     renderSpendAnalysis();
     if (state.spend.tab === "529") render529Tab();
-    render529Reconciliation();
+    await loadWithdrawals529();
   } catch (e) {
     showFlash(`Failed to load spend: ${e.message}`);
   } finally {
