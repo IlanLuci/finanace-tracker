@@ -1,7 +1,7 @@
 // Bump this version whenever the cached asset list changes so old caches get
 // purged on activation. Versioned query strings on app.js/styles.css are part
 // of each cache key, so changing those will pull a fresh copy too.
-const CACHE_NAME = "finance-tracker-shell-v18";
+const CACHE_NAME = "finance-tracker-shell-v19";
 
 const APP_SHELL = [
   "./",

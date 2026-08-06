@@ -3317,15 +3317,20 @@ function renderCashFlow() {
   const labels = keys.map((k) => (spendByKey.get(k) || incomeByKey.get(k)).label);
   const spending = keys.map((k) => Number(((spendByKey.get(k) || {}).total || 0).toFixed(2)));
   const income = keys.map((k) => Number(((incomeByKey.get(k) || {}).total || 0).toFixed(2)));
-  const net = keys.map((k, i) => Number((income[i] - spending[i]).toFixed(2)));
+
+  const totalNet = income.reduce((s, v) => s + v, 0) - spending.reduce((s, v) => s + v, 0);
+  const totalLabel = document.getElementById("cashFlowTotalLabel");
+  if (totalLabel) {
+    const sign = totalNet >= 0 ? "+" : "−";
+    totalLabel.textContent = `Cash Flow: ${sign}${currency(Math.abs(totalNet))}`;
+  }
 
   state.charts.cashFlow = new Chart(canvas, {
     data: {
       labels,
       datasets: [
         { type: "bar", label: "Income", data: income, backgroundColor: "#60d394" },
-        { type: "bar", label: "Spending", data: spending, backgroundColor: "#ee6055" },
-        { type: "line", label: "Net", data: net, borderColor: "#222", backgroundColor: "#222", tension: 0.2, pointRadius: 2 }
+        { type: "bar", label: "Spending", data: spending, backgroundColor: "#ee6055" }
       ]
     },
     options: {
