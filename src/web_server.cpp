@@ -3299,6 +3299,7 @@ namespace
         std::string notes;
         std::string account;
         std::string account_type; // "CASH" | "DEBT"
+        bool pending = false;     // still pending at the bank; row may change or vanish on next sync
     };
 
     std::vector<SpendTxn> collectSpendTransactions(PortfolioManager& manager, time_t from, time_t to)
@@ -3323,8 +3324,12 @@ namespace
             for (const Transaction& tx : portfolio.getTransactions())
             {
                 if (tx.type != TransactionType::WITHDRAWAL) continue;
-                if (notesIsPending(tx.notes)) continue;
-                if (notesStartsWithTxfr(tx.notes)) continue;
+                // Pending rows are included (flagged) so spend history matches
+                // the balance totals, which already reflect them. Strip the
+                // "[PENDING] " prefix before the transfer check and display.
+                const bool is_pending = notesIsPending(tx.notes);
+                const std::string notes_body = notesAfterPending(tx.notes);
+                if (notesStartsWithTxfr(notes_body)) continue;
 
                 const std::string upper_cat = upperCopy(tx.category);
                 if (upper_cat.rfind("TRANSFER_IN", 0) == 0) continue;
@@ -3332,16 +3337,18 @@ namespace
                 if (upper_cat.rfind("LOAN_PAYMENTS", 0) == 0) continue;
 
                 // Key BEFORE the range filter: occurrence indices must be
-                // stable across different requested ranges.
+                // stable across different requested ranges. Pending rows key
+                // on their raw prefixed notes — a disjoint namespace — so
+                // their arrival/departure can't shift posted rows' keys.
                 const std::string key = key_assigner.next(name, tx.date, tx.amount, tx.notes);
 
                 if (tx.date < from || tx.date > to) continue;
 
                 std::string effective_category = tx.category;
-                std::string effective_notes = tx.notes;
+                std::string effective_notes = notes_body;
                 if (!overrides.empty())
                 {
-                    const std::string notes_lower = lowerCopy(tx.notes);
+                    const std::string notes_lower = lowerCopy(notes_body);
                     for (const auto& rule : overrides)
                     {
                         if (notes_lower.find(rule.match_lower) != std::string::npos)
@@ -3367,6 +3374,7 @@ namespace
                 spend_tx.notes = effective_notes;
                 spend_tx.account = name;
                 spend_tx.account_type = portfolioTypeToString(pt);
+                spend_tx.pending = is_pending;
                 result.push_back(spend_tx);
             }
         }
@@ -3447,7 +3455,8 @@ namespace
                 << "\"category\":" << jsonString(txs[i].category) << ","
                 << "\"notes\":" << jsonString(txs[i].notes) << ","
                 << "\"account\":" << jsonString(txs[i].account) << ","
-                << "\"account_type\":" << jsonString(txs[i].account_type)
+                << "\"account_type\":" << jsonString(txs[i].account_type) << ","
+                << "\"pending\":" << (txs[i].pending ? "true" : "false")
                 << "}";
         }
         out << "]}";
@@ -3482,18 +3491,21 @@ namespace
             {
                 if (tx.type != TransactionType::DEPOSIT &&
                     tx.type != TransactionType::INTEREST) continue;
-                if (notesIsPending(tx.notes)) continue;
-                if (notesStartsWithTxfr(tx.notes)) continue;
+                // Same pending treatment as collectSpendTransactions: include,
+                // flag, strip prefix for matching/display, key on raw notes.
+                const bool is_pending = notesIsPending(tx.notes);
+                const std::string notes_body = notesAfterPending(tx.notes);
+                if (notesStartsWithTxfr(notes_body)) continue;
 
                 const std::string key = key_assigner.next(name, tx.date, tx.amount, tx.notes);
 
                 if (tx.date < from || tx.date > to) continue;
 
                 std::string effective_category = tx.category;
-                std::string effective_notes = tx.notes;
+                std::string effective_notes = notes_body;
                 if (!overrides.empty())
                 {
-                    const std::string notes_lower = lowerCopy(tx.notes);
+                    const std::string notes_lower = lowerCopy(notes_body);
                     for (const auto& rule : overrides)
                     {
                         if (notes_lower.find(rule.match_lower) != std::string::npos)
@@ -3519,6 +3531,7 @@ namespace
                 income_tx.notes = effective_notes;
                 income_tx.account = name;
                 income_tx.account_type = portfolioTypeToString(pt);
+                income_tx.pending = is_pending;
                 result.push_back(income_tx);
             }
         }
@@ -3543,7 +3556,8 @@ namespace
                 << "\"category\":" << jsonString(txs[i].category) << ","
                 << "\"notes\":" << jsonString(txs[i].notes) << ","
                 << "\"account\":" << jsonString(txs[i].account) << ","
-                << "\"account_type\":" << jsonString(txs[i].account_type)
+                << "\"account_type\":" << jsonString(txs[i].account_type) << ","
+                << "\"pending\":" << (txs[i].pending ? "true" : "false")
                 << "}";
         }
         out << "]}";
@@ -3780,6 +3794,12 @@ namespace
             if (txn == all.end())
             {
                 return makeJsonResponse(404, makeErrorBody("Transaction not found for that key"));
+            }
+            // Pending rows get a new key when they post (date/notes change),
+            // which would orphan the tag. Make the user wait until it posts.
+            if (txn->pending)
+            {
+                return makeJsonResponse(409, makeErrorBody("Transaction is still pending — tag it after it posts"));
             }
             record.key = key;
             record.account = txn->account;

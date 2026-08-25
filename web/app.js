@@ -3251,15 +3251,20 @@ function renderSpendDrilldownTable(transactions) {
   const rows = transactions
     .map((tx) => {
       const merchant = tx.notes || "—";
-      return `<tr>
+      // Pending rows can't be tagged yet — their key changes once they post.
+      const actions = tx.pending
+        ? `<span class="muted-note">pending</span>`
+        : `<button class="ghost-btn drilldown-529-btn" type="button" data-key="${escapeHtml(tx.key)}">529</button>
+          <button class="ghost-btn drilldown-deduct-btn" type="button" data-key="${escapeHtml(tx.key)}">Deduct</button>`;
+      const pendingBadge = tx.pending
+        ? `<span class="chip chip-pending" title="Pending at the bank — may change until it posts">Pending</span> `
+        : "";
+      return `<tr${tx.pending ? ' class="tx-row-pending"' : ""}>
         <td>${dateLabel(tx.date)}</td>
-        <td>${escapeHtml(merchant)}</td>
+        <td>${pendingBadge}${escapeHtml(merchant)}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td class="num">${currency(tx.amount)}</td>
-        <td>
-          <button class="ghost-btn drilldown-529-btn" type="button" data-key="${escapeHtml(tx.key)}">529</button>
-          <button class="ghost-btn drilldown-deduct-btn" type="button" data-key="${escapeHtml(tx.key)}">Deduct</button>
-        </td>
+        <td>${actions}</td>
       </tr>`;
     })
     .join("");
@@ -3812,6 +3817,7 @@ function renderTaxIncomeQueue(incomeTxByKey) {
   const queue = state.tax.incomeTxs
     .filter((tx) =>
       (tx.category || "").startsWith("INCOME_") &&
+      !tx.pending &&
       !state.tax.tags.income[tx.key])
     .sort((a, b) => (b.date || 0) - (a.date || 0));
   if (queue.length === 0) {
@@ -3861,12 +3867,14 @@ function renderTaxDeposits(incomeTxByKey) {
     .map((tx) => {
       const tag = state.tax.tags.income[tx.key];
       const marked = tag && tag.status === "qualified";
-      const action = marked
+      const action = tx.pending
+        ? `<span class="muted-note">pending</span>`
+        : marked
         ? `<span class="muted-note">marked</span>`
         : `<button class="ghost-btn tax-mark-income-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Mark taxable</button>`;
       return `<tr>
         <td>${dateLabel(tx.date)}</td>
-        <td>${escapeHtml(tx.notes || "—")}</td>
+        <td>${tx.pending ? '<span class="chip chip-pending">Pending</span> ' : ""}${escapeHtml(tx.notes || "—")}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td class="num">${currency(tx.amount)}</td>
         <td>${action}</td>
@@ -3894,12 +3902,14 @@ function renderTaxExpenseBrowser(spendTxByKey) {
     .map((tx) => {
       const tag = state.tax.tags.deductions[tx.key];
       const marked = tag && tag.status === "qualified";
-      const action = marked
+      const action = tx.pending
+        ? `<span class="muted-note">pending</span>`
+        : marked
         ? `<span class="muted-note">marked</span>`
         : `<button class="ghost-btn tax-deduct-expense-btn" type="button" data-key="${escapeHtml(tx.key)}">✓ Deduct</button>`;
       return `<tr>
         <td>${dateLabel(tx.date)}</td>
-        <td>${escapeHtml(tx.notes || "—")}</td>
+        <td>${tx.pending ? '<span class="chip chip-pending">Pending</span> ' : ""}${escapeHtml(tx.notes || "—")}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td class="num">${currency(tx.amount)}</td>
         <td>${action}</td>
@@ -4098,6 +4108,7 @@ function render529Queue(txByKey) {
   const queue = (state.spend.transactions || [])
     .filter((tx) =>
       tx.account_type === "DEBT" &&
+      !tx.pending &&
       isCandidate529Category(tx.category) &&
       isWithinAcademicYear(tx.date) &&
       !state.spend.tags529[tx.key])
