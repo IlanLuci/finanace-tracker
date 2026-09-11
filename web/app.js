@@ -309,7 +309,8 @@ const state = {
   stocksSort: { key: null, dir: null },
   allTransactions: {},
   monthlyShowAll: false,
-  inTransit: { total: 0, entries: [] }
+  inTransit: { total: 0, entries: [] },
+  reconciliation: { held_out_total: 0, events: [], accounts: [] }
 };
 
 const el = {
@@ -1807,15 +1808,66 @@ function renderTransactionTable(transactions, options = {}) {
   </thead><tbody>${rows}</tbody></table>`;
 }
 
+// Confirm cards for detected unexplained cash increases awaiting classification.
+function renderReconciliationBanner() {
+  const events = (state.reconciliation?.events || []).filter((e) => e.status === "pending");
+  if (!events.length) return "";
+  const accounts = state.reconciliation?.accounts || [];
+  return events.map((e) => {
+    const id = encodeURIComponent(e.id || "");
+    const dest = e.dest_account || "";
+    const options = accounts
+      .filter((name) => name !== dest)
+      .map((name) => `<option value="${encodeURIComponent(name)}">${escapeHtml(portfolioDisplayName(name))}</option>`)
+      .join("");
+    return `
+      <article class="panel fade-up recon-banner" data-recon-id="${id}">
+        <div class="panel-head"><h3>Unexplained balance change</h3></div>
+        <p><strong>${currency(Number(e.amount) || 0)}</strong> appeared in
+          <strong>${escapeHtml(portfolioDisplayName(dest))}</strong> with no matching transaction.
+          Is this an in-flight transfer from another account, or a real deposit?</p>
+        <div class="chart-tools">
+          <select class="recon-source-select graph-period-select" aria-label="Transfer source account">
+            <option value="">Transfer from…</option>
+            ${options}
+          </select>
+          <button class="primary-btn recon-transfer-btn" type="button">Confirm transfer</button>
+          <button class="ghost-btn recon-deposit-btn" type="button">Real deposit</button>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+async function classifyReconciliation(id, body) {
+  try {
+    await apiPost(`/api/reconciliation/${encodeURIComponent(id)}/classify`, body);
+    await refreshReconciliation();
+    renderDashboard();
+    showFlash(
+      body.status === "transfer" ? "Marked as an in-flight transfer." : "Marked as a real deposit.",
+      "success"
+    );
+  } catch (error) {
+    showFlash(error.message);
+  }
+}
+
 function renderDashboard() {
-  const portfolios = normalizePortfolios(state.portfolios);
-  state.portfolios = portfolios;
+  const normalized = normalizePortfolios(state.portfolios);
+  state.portfolios = normalized;
+  // Derive an in-flight-transfer-corrected view for all dashboard aggregates.
+  // state.portfolios stays raw so live-refresh re-derives cleanly each render.
+  const portfolios = applyReconciliationToPortfolios(normalized);
 
   const accountPortfolios = portfolios.filter((p) => !isWatchlistPortfolio(p));
 
   // DEBT accounts contribute a negative estimated_total_value (set server-side),
   // so the same reduce naturally subtracts outstanding balances from totals.
+  // `portfolios` is already in-flight-transfer-corrected (see
+  // applyReconciliationToPortfolios), so every aggregate below — total, trend,
+  // day change, cash — is consistent by construction.
   const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  const heldOutTotal = Number(state.reconciliation?.held_out_total) || 0;
   // We surface unmatched transfer outflows in the subline but no longer add
   // them back to the total — the in-transit pile mixes own-account transfers
   // (where add-back is correct) with peer-to-peer payments like Zelle to a
@@ -1831,7 +1883,10 @@ function renderDashboard() {
     return sum + (p.available_capital || 0) * fx;
   }, 0);
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
-  const aggregateTrend = mergeDailySeries(accountPortfolios);
+  const aggregateTrend = shiftTrendSeries(
+    mergeDailySeries(accountPortfolios),
+    heldOutForPortfolios(accountPortfolios)
+  );
   // Day Change tracks the chart: live total vs. the most recent prior-day
   // snapshot. This includes deposits/withdrawals/transfers, matching what
   // the line on the dashboard chart reflects.
@@ -1845,9 +1900,11 @@ function renderDashboard() {
     : 0;
 
   const accountCountSub = `${accountPortfolios.length} account${accountPortfolios.length === 1 ? "" : "s"}`;
-  const totalAssetsSub = inTransitTotal > 0
-    ? `${currency(inTransitTotal)} in transit (not included)`
-    : accountCountSub;
+  const totalAssetsSub = heldOutTotal > 0
+    ? `${currency(heldOutTotal)} in-flight transfer held out`
+    : (inTransitTotal > 0
+      ? `${currency(inTransitTotal)} in transit (not included)`
+      : accountCountSub);
 
   const dashboardMetrics = `<section class="metric-grid">
     ${metricCard("Total Assets", currency(totalAssets), totalAssetsSub)}
@@ -1940,6 +1997,7 @@ function renderDashboard() {
   const chartHostId = "dashboardChart";
   el.dashboardView.innerHTML = `
     ${dashboardMetrics}
+    ${renderReconciliationBanner()}
     <article class="panel chart-panel fade-up">
       <div class="panel-head">
         <h3 id="dashboardChartTitle">${dashboardScopeTitle(state.dashboardScope)}</h3>
@@ -1990,6 +2048,30 @@ function renderDashboard() {
     });
   }
 
+  document.querySelectorAll(".recon-transfer-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const banner = btn.closest(".recon-banner");
+      if (!banner) return;
+      const id = decodeURIComponent(banner.dataset.reconId || "");
+      const select = banner.querySelector(".recon-source-select");
+      const source = select ? decodeURIComponent(select.value || "") : "";
+      if (!source) {
+        showFlash("Pick the source account for this transfer.");
+        return;
+      }
+      classifyReconciliation(id, { status: "transfer", source_account: source });
+    });
+  });
+
+  document.querySelectorAll(".recon-deposit-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const banner = btn.closest(".recon-banner");
+      if (!banner) return;
+      const id = decodeURIComponent(banner.dataset.reconId || "");
+      classifyReconciliation(id, { status: "deposit" });
+    });
+  });
+
   document.querySelectorAll(".portfolio-card").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.closest(".pin-btn") || event.target.closest(".reauth-chip")) {
@@ -2036,7 +2118,10 @@ function renderDashboard() {
 
   const drawDashboardChart = () => {
     const scopedPortfolios = portfoliosForDashboardScope(accountPortfolios, state.dashboardScope);
-    const scopedAggregate = mergeDailySeries(scopedPortfolios);
+    const scopedAggregate = shiftTrendSeries(
+      mergeDailySeries(scopedPortfolios),
+      heldOutForPortfolios(scopedPortfolios)
+    );
     const filtered = filterPointsByPeriod(scopedAggregate, state.periods.dashboard);
     const trend = computeTrend(filtered);
     const color = trendColor(trend.percentChange);
@@ -3025,7 +3110,7 @@ async function openPortfolio(name) {
       apiGet(`/api/portfolios/${encodeURIComponent(name)}/transactions/recent?limit=8`)
     ]);
 
-    state.currentPortfolio = portfolio;
+    state.currentPortfolio = applyReconciliationToDetail(portfolio);
     state.currentStocks = normalizeStocks(stocksPayload.stocks || []);
     state.recentTransactions = recentPayload.transactions || [];
     state.stocksSort = { key: null, dir: null };
@@ -4787,12 +4872,90 @@ async function refreshInTransit() {
   }
 }
 
+async function refreshReconciliation() {
+  try {
+    const data = await apiGet("/api/reconciliation");
+    state.reconciliation = {
+      held_out_total: Number(data?.held_out_total) || 0,
+      held_out_by_source: Array.isArray(data?.held_out_by_source) ? data.held_out_by_source : [],
+      events: Array.isArray(data?.events) ? data.events : [],
+      accounts: Array.isArray(data?.accounts) ? data.accounts : []
+    };
+  } catch (_) {
+    state.reconciliation = { held_out_total: 0, held_out_by_source: [], events: [], accounts: [] };
+  }
+}
+
+// Map of source account name -> held-out amount for active in-flight transfers.
+function heldOutByNameMap() {
+  const map = new Map();
+  (state.reconciliation?.held_out_by_source || []).forEach((h) => {
+    const acct = String(h?.account || "");
+    const amount = Number(h?.amount) || 0;
+    if (acct && amount > 0) map.set(acct, (map.get(acct) || 0) + amount);
+  });
+  return map;
+}
+
+// Total held-out attributable to the accounts in `portfolios` (so a scoped
+// chart that excludes the source account isn't wrongly reduced).
+function heldOutForPortfolios(portfolios) {
+  const map = heldOutByNameMap();
+  if (!map.size) return 0;
+  return (portfolios || []).reduce((sum, p) => sum + (map.get(p?.name) || 0), 0);
+}
+
+// Reduce each source account's CURRENT value (cash + estimated total) by the
+// held-out amount, so Total Assets, Total Available Cash, and the per-account
+// cards all reflect that an in-flight transfer has effectively left the source.
+// The trend chart is corrected separately as a flat shift (see renderDashboard)
+// to keep the line's shape and avoid an artificial one-day cliff. Pure: returns
+// a new array; never mutates state.portfolios.
+function applyReconciliationToPortfolios(portfolios) {
+  const map = heldOutByNameMap();
+  if (!map.size) return portfolios;
+  return (portfolios || []).map((p) => {
+    const amount = map.get(p?.name) || 0;
+    if (!amount) return p;
+    return {
+      ...p,
+      available_capital: safeNumber(p?.available_capital) - amount,
+      estimated_total_value: safeNumber(p?.estimated_total_value) - amount
+    };
+  });
+}
+
+// Flat-shift a merged trend series down by `offset` (the in-flight hold-out).
+// Preserves the line's shape so day-over-day change stays market-driven while
+// the current endpoint matches the corrected Total Assets card.
+function shiftTrendSeries(series, offset) {
+  if (!offset) return series;
+  return (series || []).map((pt) => ({ ...pt, value: safeNumber(pt?.value) - offset }));
+}
+
+// Correct a single account's detail payload for an in-flight transfer so its
+// detail page (total, cash, chart) matches its dashboard card. Same treatment
+// as the dashboard: reduce current value and flat-shift the value series.
+function applyReconciliationToDetail(portfolio) {
+  const amount = heldOutByNameMap().get(portfolio?.name) || 0;
+  if (!amount) return portfolio;
+  const dailyValues = (Array.isArray(portfolio?.daily_values) ? portfolio.daily_values : [])
+    .map((pt) => ({ ...pt, value: safeNumber(pt?.value) - amount }));
+  return {
+    ...portfolio,
+    available_capital: safeNumber(portfolio?.available_capital) - amount,
+    estimated_total_value: safeNumber(portfolio?.estimated_total_value) - amount,
+    daily_values: dailyValues
+  };
+}
+
 async function loadDashboard() {
   hideFlash();
   try {
     const [payload] = await Promise.all([
       apiGet("/api/portfolios"),
-      refreshInTransit()
+      refreshInTransit(),
+      refreshReconciliation()
     ]);
     state.portfolios = normalizePortfolios(payload.portfolios);
     refreshAllTransactionsForDashboard();

@@ -9,5 +9,6 @@ backups/
 
 test_persistence
 test_529
+test_reconciliation
 .env
 /tools/__pycache__

@@ -7,12 +7,12 @@ SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = .
 
-SOURCES = $(SRC_DIR)/main.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/plaid_client.cpp $(SRC_DIR)/expense_tags.cpp
-OBJECTS = $(OBJ_DIR)/main.o $(OBJ_DIR)/portfolio_data.o $(OBJ_DIR)/file_utils.o $(OBJ_DIR)/web_server.o $(OBJ_DIR)/market_data_sync.o $(OBJ_DIR)/plaid_client.o $(OBJ_DIR)/expense_tags.o
+SOURCES = $(SRC_DIR)/main.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/plaid_client.cpp $(SRC_DIR)/expense_tags.cpp $(SRC_DIR)/reconciliation.cpp
+OBJECTS = $(OBJ_DIR)/main.o $(OBJ_DIR)/portfolio_data.o $(OBJ_DIR)/file_utils.o $(OBJ_DIR)/web_server.o $(OBJ_DIR)/market_data_sync.o $(OBJ_DIR)/plaid_client.o $(OBJ_DIR)/expense_tags.o $(OBJ_DIR)/reconciliation.o
 TARGET = $(BIN_DIR)/finance_tracker
 TEST_PERSISTENCE_BIN = $(BIN_DIR)/test_persistence
 
-.PHONY: all clean run test-persistence test-529
+.PHONY: all clean run test-persistence test-529 test-reconciliation
 
 all: $(TARGET)
 
@@ -27,7 +27,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 run: $(TARGET)
 	./$(TARGET)
 
-$(TEST_PERSISTENCE_BIN): test_persistence.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/plaid_client.cpp $(SRC_DIR)/expense_tags.cpp
+$(TEST_PERSISTENCE_BIN): test_persistence.cpp $(SRC_DIR)/portfolio_data.cpp $(SRC_DIR)/file_utils.cpp $(SRC_DIR)/market_data_sync.cpp $(SRC_DIR)/web_server.cpp $(SRC_DIR)/plaid_client.cpp $(SRC_DIR)/expense_tags.cpp $(SRC_DIR)/reconciliation.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^ $(LIBS)
 
 test-persistence: $(TEST_PERSISTENCE_BIN)
@@ -41,5 +41,13 @@ $(TEST_529_BIN): test_529.cpp $(SRC_DIR)/expense_tags.cpp
 test-529: $(TEST_529_BIN)
 	./$(TEST_529_BIN)
 
+TEST_RECONCILIATION_BIN = $(BIN_DIR)/test_reconciliation
+
+$(TEST_RECONCILIATION_BIN): test_reconciliation.cpp $(SRC_DIR)/reconciliation.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ $^
+
+test-reconciliation: $(TEST_RECONCILIATION_BIN)
+	./$(TEST_RECONCILIATION_BIN)
+
 clean:
-	rm -rf $(OBJ_DIR) $(TARGET) $(TEST_PERSISTENCE_BIN) $(TEST_529_BIN)
+	rm -rf $(OBJ_DIR) $(TARGET) $(TEST_PERSISTENCE_BIN) $(TEST_529_BIN) $(TEST_RECONCILIATION_BIN)

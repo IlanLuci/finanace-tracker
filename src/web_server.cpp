@@ -4,6 +4,7 @@
 #include "market_data_sync.hpp"
 #include "plaid_client.hpp"
 #include "portfolio_data.hpp"
+#include "reconciliation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1369,6 +1370,98 @@ namespace
         }
         out = std::move(data);
         return true;
+    }
+
+    // ---- Balance-vs-ledger reconciliation glue (see reconciliation.hpp) -----
+    // The engine itself is a pure state machine; here we wire it to the
+    // portfolio store (persistence, sync-time detection, read-time sweep).
+
+    const char* const kReconciliationPath = "data/reconciliation.json";
+
+    Reconciliation::State loadReconciliation()
+    {
+        std::ifstream f(kReconciliationPath);
+        if (!f.is_open()) return Reconciliation::State{};
+        std::stringstream buf;
+        buf << f.rdbuf();
+        return Reconciliation::parse(buf.str());
+    }
+
+    bool saveReconciliation(const Reconciliation::State& state)
+    {
+        const std::string tmp = std::string(kReconciliationPath) + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f.is_open()) return false;
+            f << Reconciliation::serialize(state);
+            if (!f.good()) return false;
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, kReconciliationPath, ec);
+        return !ec;
+    }
+
+    time_t reconDayFloor(time_t t)
+    {
+        return t <= 0 ? 0 : t - (t % 86400);
+    }
+
+    // Sum of transaction cash impact dated on/after `since`'s day. With
+    // positive_only, only credits count (used to detect a posted deposit).
+    double reconLedgerCreditSince(const Portfolio& p, time_t since, bool positive_only)
+    {
+        const time_t floor = reconDayFloor(since);
+        double sum = 0.0;
+        for (const auto& t : p.getTransactions())
+        {
+            if (t.date < floor) continue;
+            if (positive_only && t.amount <= 0.0) continue;
+            sum += t.amount;
+        }
+        return sum;
+    }
+
+    // Read-time view of current account cash + recent credits for the sweep.
+    struct ManagerAnchorLookup : public Reconciliation::AnchorLookup
+    {
+        PortfolioManager& manager;
+        explicit ManagerAnchorLookup(PortfolioManager& m) : manager(m) {}
+
+        bool anchor(const std::string& account, double& out) const override
+        {
+            Portfolio p;
+            if (!loadPortfolioCached(manager, account, p)) return false;
+            out = p.getAvailableCapital();
+            return true;
+        }
+        double creditSince(const std::string& account, time_t since) const override
+        {
+            Portfolio p;
+            if (!loadPortfolioCached(manager, account, p)) return 0.0;
+            return reconLedgerCreditSince(p, since, /*positive_only=*/true);
+        }
+    };
+
+    // Detection hook: run at the end of a successful account sync. `new_anchor`
+    // is the freshly-set cash anchor (captured before any later ledger edits).
+    void reconciliationObserveSync(const std::string& portfolio_name,
+                                   const Portfolio& rebuilt, double new_anchor)
+    {
+        Reconciliation::State st = loadReconciliation();
+        const time_t now = std::time(nullptr);
+        time_t prior_synced = 0;
+        auto it = st.snapshots.find(portfolio_name);
+        if (it != st.snapshots.end()) prior_synced = it->second.synced_at;
+
+        double explained_delta = 0.0;
+        if (prior_synced > 0)
+        {
+            explained_delta = reconLedgerCreditSince(rebuilt, prior_synced, /*positive_only=*/false);
+        }
+        const std::string event_id = portfolio_name + "-" + std::to_string((long long)now)
+                                     + "-" + std::to_string(rebuilt.getTransactions().size());
+        Reconciliation::observe(st, portfolio_name, new_anchor, explained_delta, now, event_id);
+        saveReconciliation(st);
     }
 
     std::vector<std::string> listStocksCached(PortfolioManager& manager,
@@ -3224,6 +3317,78 @@ namespace
         return out.str();
     }
 
+    // Dashboard payload for the reconciliation engine: the current held-out
+    // total, the active (pending + confirmed-transfer) events, and the list of
+    // connected accounts to populate the "transfer from" source picker.
+    std::string buildReconciliationJson(PortfolioManager& manager)
+    {
+        Reconciliation::State st = loadReconciliation();
+        ManagerAnchorLookup lookup(manager);
+        if (Reconciliation::sweep(st, lookup, std::time(nullptr)))
+        {
+            saveReconciliation(st);
+        }
+
+        // Per-source hold-out charged to each source account. The frontend
+        // reduces that account's current value and flat-shifts the aggregate
+        // trend by this amount (preserving the line's shape).
+        std::map<std::string, double> by_source;
+        for (const auto& e : st.events)
+        {
+            if (e.status != Reconciliation::EventStatus::Transfer || e.source_account.empty()) continue;
+            by_source[e.source_account] += e.amount;
+        }
+
+        std::ostringstream out;
+        out << "{"
+            << "\"held_out_total\":" << jsonNumber(Reconciliation::heldOutTotal(st)) << ","
+            << "\"held_out_by_source\":[";
+        bool first_src = true;
+        for (const auto& kv : by_source)
+        {
+            if (!first_src) out << ",";
+            first_src = false;
+            out << "{"
+                << "\"account\":" << jsonString(kv.first) << ","
+                << "\"amount\":" << jsonNumber(kv.second)
+                << "}";
+        }
+        out << "],\"events\":[";
+        bool first = true;
+        for (const auto& e : st.events)
+        {
+            if (e.status != Reconciliation::EventStatus::Pending &&
+                e.status != Reconciliation::EventStatus::Transfer)
+            {
+                continue;
+            }
+            if (!first) out << ",";
+            first = false;
+            out << "{"
+                << "\"id\":" << jsonString(e.id) << ","
+                << "\"dest_account\":" << jsonString(e.dest_account) << ","
+                << "\"amount\":" << jsonNumber(e.amount) << ","
+                << "\"detected_at\":" << static_cast<long long>(e.detected_at) << ","
+                << "\"status\":" << jsonString(Reconciliation::statusToString(e.status)) << ","
+                << "\"source_account\":" << jsonString(e.source_account)
+                << "}";
+        }
+        out << "],\"accounts\":[";
+        first = true;
+        if (manager.scanPortfolios())
+        {
+            for (const auto& name : manager.getPortfolioNames())
+            {
+                if (!manager.hasConnection(name)) continue;
+                if (!first) out << ",";
+                first = false;
+                out << jsonString(name);
+            }
+        }
+        out << "]}";
+        return out.str();
+    }
+
     // Parse "YYYY-MM-DD" into a UTC unix timestamp at noon. Returns 0 on failure.
     time_t parseIsoDateUTC(const std::string& s)
     {
@@ -4247,7 +4412,8 @@ namespace
             rebuilt.addTransaction(tx.date, our_amount, type, notes, category);
             tx_sum += our_amount;
         }
-        rebuilt.setAvailableCapital(have_anchor ? anchor_balance : tx_sum);
+        const double recon_anchor = have_anchor ? anchor_balance : tx_sum;
+        rebuilt.setAvailableCapital(recon_anchor);
 
         if (!manager.savePortfolio(portfolio_name, rebuilt))
         {
@@ -4257,6 +4423,9 @@ namespace
         {
             return makeJsonResponse(500, makeErrorBody("Sync saved but daily totals failed to recompute"));
         }
+
+        // Detect any unexplained balance movement introduced by this sync.
+        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor);
 
         const time_t now = std::time(nullptr);
         conn.last_synced = now;
@@ -4532,9 +4701,10 @@ namespace
                                  - non_cash_holdings_value
                                  - cash_equiv_value;
         if (settlement_cash < 0.0) settlement_cash = 0.0;
-        rebuilt.setAvailableCapital(have_balance_anchor
+        const double recon_anchor = have_balance_anchor
             ? cash_equiv_value + settlement_cash
-            : running_cash + cash_equiv_value);
+            : running_cash + cash_equiv_value;
+        rebuilt.setAvailableCapital(recon_anchor);
 
         // Plaid only returns ~2 years of transactions, so a ticker may have SELLs
         // in our window without the matching BUYs (or only holdings with no buys at
@@ -4740,6 +4910,9 @@ namespace
         MarketDataSync::syncPortfolio(manager, portfolio_name, sync_config);
         MarketDataSync::recomputePortfolioDailyValues(manager, portfolio_name);
 
+        // Detect any unexplained balance movement introduced by this sync.
+        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor);
+
         conn.last_synced = now;
         manager.saveConnection(portfolio_name, conn);
 
@@ -4881,6 +5054,108 @@ namespace
         if (request.method == "GET" && request.path == "/api/in-transit")
         {
             return makeJsonResponse(200, buildInTransitJson(manager));
+        }
+
+        if (request.method == "GET" && request.path == "/api/reconciliation")
+        {
+            return makeJsonResponse(200, buildReconciliationJson(manager));
+        }
+
+        // Manually record an already-known in-flight transfer (e.g. one that
+        // predates the reconciliation engine). Body: {source_account, dest_account, amount}.
+        if (request.method == "POST" && request.path == "/api/reconciliation")
+        {
+            JsonValue body;
+            HttpResponse parse_error = parseJsonBodyObject(request, body);
+            if (parse_error.status != 200) return parse_error;
+
+            const auto src = getObjectString(body, "source_account");
+            const auto dst = getObjectString(body, "dest_account");
+            const auto amt = getObjectNumber(body, "amount");
+            if (!src.has_value() || !dst.has_value() || !amt.has_value())
+            {
+                return makeJsonResponse(400, makeErrorBody("source_account, dest_account, and amount are required"));
+            }
+            const std::string source = trim(src.value());
+            const std::string dest = trim(dst.value());
+            const double amount = amt.value();
+            if (source.empty() || dest.empty() || amount <= 0.0)
+            {
+                return makeJsonResponse(400, makeErrorBody("Invalid source_account, dest_account, or amount"));
+            }
+            if (source == dest)
+            {
+                return makeJsonResponse(400, makeErrorBody("source_account and dest_account must differ"));
+            }
+
+            double source_anchor = 0.0;
+            {
+                Portfolio p;
+                if (loadPortfolioCached(manager, source, p)) source_anchor = p.getAvailableCapital();
+            }
+            Reconciliation::State st = loadReconciliation();
+            const time_t now = std::time(nullptr);
+            const std::string id = "manual-" + std::to_string(static_cast<long long>(now))
+                                   + "-" + std::to_string(st.events.size());
+            const std::string result_id =
+                Reconciliation::createTransfer(st, source, dest, amount, source_anchor, now, id);
+            if (!saveReconciliation(st))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to save reconciliation state"));
+            }
+            return makeJsonResponse(201, std::string("{\"status\":\"ok\",\"id\":") + jsonString(result_id) + "}");
+        }
+
+        // Classify a pending event: {status:"transfer", source_account:"..."} or {status:"deposit"}.
+        if (request.method == "POST" && segments.size() == 4 &&
+            segments[0] == "api" && segments[1] == "reconciliation" && segments[3] == "classify")
+        {
+            const std::string event_id = percentDecode(segments[2]);
+            JsonValue body;
+            HttpResponse parse_error = parseJsonBodyObject(request, body);
+            if (parse_error.status != 200) return parse_error;
+
+            const auto status_s = getObjectString(body, "status");
+            if (!status_s.has_value())
+            {
+                return makeJsonResponse(400, makeErrorBody("status is required"));
+            }
+            const std::string status = trim(status_s.value());
+            Reconciliation::State st = loadReconciliation();
+            const time_t now = std::time(nullptr);
+            bool ok = false;
+            if (status == "transfer")
+            {
+                const auto src = getObjectString(body, "source_account");
+                if (!src.has_value() || trim(src.value()).empty())
+                {
+                    return makeJsonResponse(400, makeErrorBody("source_account is required for a transfer"));
+                }
+                const std::string source = trim(src.value());
+                double source_anchor = 0.0;
+                {
+                    Portfolio p;
+                    if (loadPortfolioCached(manager, source, p)) source_anchor = p.getAvailableCapital();
+                }
+                ok = Reconciliation::classifyTransfer(st, event_id, source, source_anchor, now);
+            }
+            else if (status == "deposit")
+            {
+                ok = Reconciliation::classifyDeposit(st, event_id, now);
+            }
+            else
+            {
+                return makeJsonResponse(400, makeErrorBody("status must be transfer or deposit"));
+            }
+            if (!ok)
+            {
+                return makeJsonResponse(404, makeErrorBody("Pending event not found"));
+            }
+            if (!saveReconciliation(st))
+            {
+                return makeJsonResponse(500, makeErrorBody("Failed to save reconciliation state"));
+            }
+            return makeJsonResponse(200, "{\"status\":\"ok\"}");
         }
 
         if (request.method == "GET" && request.path == "/api/spend")
