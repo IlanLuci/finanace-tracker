@@ -115,11 +115,11 @@ int main()
     // 7. Clear path: source cash drops by ~amount (Plaid debited the source).
     {
         State s;
-        std::string id = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, T0, "m");
+        std::string id = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 9542.45, T0, "m");
         check(approx(heldOutTotal(s), 5700.0), "manual transfer held out immediately");
         MockLookup lk;
         lk.anchors["Broker"] = 8887.68 - 5700.0;   // source finally dropped
-        lk.anchors["Roth"]   = 9542.45;
+        lk.anchors["Roth"]   = 9542.45;            // dest unchanged (no dest_rose)
         bool changed = sweep(s, lk, T0 + DAY);
         check(changed, "sweep reports change");
         check(s.events[0].status == EventStatus::Cleared, "transfer cleared");
@@ -155,15 +155,87 @@ int main()
         check(changed && s.events[0].clear_reason == "reverted", "cleared on revert");
     }
 
-    // 10. Backstop: a stale transfer clears after TRANSFER_EXPIRY_DAYS.
+    // 10. Backstop: a stale transfer clears after TRANSFER_EXPIRY_BUSINESS_DAYS.
     {
         State s;
-        createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, T0, "m");
+        createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 9542.45, T0, "m");
         MockLookup lk;
         lk.anchors["Broker"] = 8887.68;            // never dropped
-        lk.anchors["Roth"]   = 9542.45;
-        bool changed = sweep(s, lk, T0 + (TRANSFER_EXPIRY_DAYS + 1) * DAY);
+        lk.anchors["Roth"]   = 9542.45;            // dest unchanged (no dest_rose)
+        bool changed = sweep(s, lk, T0 + 7 * DAY); // well past 3 business days
         check(changed && s.events[0].clear_reason == "expired", "stale transfer expires");
+    }
+
+    // 10a. Business-day backstop does NOT count a weekend as settlement time.
+    {
+        const time_t FRI = T0 + DAY;               // T0 is a Thursday, so T0+1d is Friday
+        State s;
+        createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 9542.45, FRI, "m");
+        MockLookup lk;
+        lk.anchors["Broker"] = 8887.68;            // never dropped
+        lk.anchors["Roth"]   = 9542.45;            // no dest_rose
+        // +3 calendar days = Monday -> only 1 business day elapsed, must NOT expire.
+        bool over_weekend = sweep(s, lk, FRI + 3 * DAY);
+        check(!over_weekend && s.events[0].status == EventStatus::Transfer,
+              "3 calendar days across a weekend does not expire");
+        // +5 calendar days = Wednesday -> 3 business days elapsed, expires.
+        bool by_wed = sweep(s, lk, FRI + 5 * DAY);
+        check(by_wed && s.events[0].clear_reason == "expired",
+              "3 business days later the transfer expires");
+    }
+
+    // 10b. businessDaysBetween counts weekdays in (from, to]. T0 is a Thursday.
+    {
+        check(businessDaysBetween(T0, T0) == 0, "no elapsed time -> 0 business days");
+        check(businessDaysBetween(T0, T0 + 1 * DAY) == 1, "Thu->Fri = 1 business day");
+        check(businessDaysBetween(T0, T0 + 2 * DAY) == 1, "Thu->Sat still 1 (Sat excluded)");
+        check(businessDaysBetween(T0, T0 + 3 * DAY) == 1, "Thu->Sun still 1 (Sun excluded)");
+        check(businessDaysBetween(T0, T0 + 4 * DAY) == 2, "Thu->Mon = 2 business days");
+        check(businessDaysBetween(T0, T0 + 5 * DAY) == 3, "Thu->Tue = 3 business days");
+    }
+
+    // 10c. dest_rose: a manual transfer clears when the destination balance rises
+    //      by ~amount, even though the source never dropped and no txn posted
+    //      (the Vanguard settlement-fund case that used to get stuck).
+    {
+        State s;
+        createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 3842.45, T0, "m");
+        MockLookup lk;
+        lk.anchors["Broker"] = 8887.68;            // source cash never visibly dropped
+        lk.anchors["Roth"]   = 3842.45 + 5700.0;   // money landed in the destination
+        bool changed = sweep(s, lk, T0 + DAY);
+        check(changed && s.events[0].status == EventStatus::Cleared,
+              "manual transfer clears when destination balance rises by ~amount");
+        check(s.events[0].clear_reason == "dest_rose", "reason = dest_rose");
+        check(approx(heldOutTotal(s), 0.0), "no hold-out after dest_rose");
+    }
+
+    // 10d. dest_rose must NOT fire for an auto-detected transfer, whose baseline
+    //      is already the post-arrival (elevated) anchor.
+    {
+        State s;
+        observe(s, "Roth", 3842.45, 0.0, T0, "b");
+        observe(s, "Roth", 9542.45, 0.0, T0 + DAY, "evt"); // dest_anchor_at_detection = 9542.45
+        classifyTransfer(s, "evt", "Broker", 8887.68, T0 + DAY);
+        MockLookup lk;
+        lk.anchors["Broker"] = 8887.68;            // source not dropped
+        lk.anchors["Roth"]   = 9542.45;            // dest steady at its elevated level
+        bool changed = sweep(s, lk, T0 + 2 * DAY);
+        check(!changed && s.events[0].status == EventStatus::Transfer,
+              "auto-detected transfer not spuriously cleared by dest_rose");
+    }
+
+    // 10e. dest_rose is disabled when the baseline is unknown (0), so a genuine
+    //      balance can't be mistaken for a rise-from-zero.
+    {
+        State s;
+        createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 0.0, T0, "m");
+        MockLookup lk;
+        lk.anchors["Broker"] = 8887.68;
+        lk.anchors["Roth"]   = 5700.0;             // looks like a rise from 0, but baseline unknown
+        bool changed = sweep(s, lk, T0 + DAY);
+        check(!changed && s.events[0].status == EventStatus::Transfer,
+              "dest_rose disabled when baseline unknown (0)");
     }
 
     // 11. Pending auto-dismiss to deposit after PENDING_EXPIRY_DAYS.
@@ -198,8 +270,8 @@ int main()
     // 13a. createTransfer is idempotent for an already-active transfer.
     {
         State s;
-        std::string a = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, T0, "m1");
-        std::string b = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, T0, "m2");
+        std::string a = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 9542.45, T0, "m1");
+        std::string b = createTransfer(s, "Broker", "Roth", 5700.0, 8887.68, 9542.45, T0, "m2");
         check(a == "m1" && b == "m1", "duplicate manual transfer returns existing id");
         check(s.events.size() == 1, "no duplicate event appended");
         check(approx(heldOutTotal(s), 5700.0), "held-out not double-counted");

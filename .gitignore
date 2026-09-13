@@ -10,5 +10,6 @@ backups/
 test_persistence
 test_529
 test_reconciliation
+test_cash_history
 .env
 /tools/__pycache__

@@ -5,6 +5,7 @@
 #include "plaid_client.hpp"
 #include "portfolio_data.hpp"
 #include "reconciliation.hpp"
+#include "cash_history.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1401,6 +1402,64 @@ namespace
         return !ec;
     }
 
+    // ---- Persisted cash-balance history (see cash_history.hpp) --------------
+    // Brokerage cash can't be reconstructed from the ledger when the broker moves
+    // cash through a settlement fund (Vanguard VMFXX) that never posts as a
+    // transaction. We snapshot the real cash anchor once per day at sync time.
+
+    const char* const kCashHistoryPath = "data/cash_history.json";
+
+    CashHistory::State loadCashHistory()
+    {
+        std::ifstream f(kCashHistoryPath);
+        if (!f.is_open()) return CashHistory::State{};
+        std::stringstream buf;
+        buf << f.rdbuf();
+        return CashHistory::parse(buf.str());
+    }
+
+    bool saveCashHistory(const CashHistory::State& state)
+    {
+        const std::string tmp = std::string(kCashHistoryPath) + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f.is_open()) return false;
+            f << CashHistory::serialize(state);
+            if (!f.good()) return false;
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, kCashHistoryPath, ec);
+        return !ec;
+    }
+
+    // Confirmed own-account transfers used to keep internal moves net-neutral in
+    // the Total Assets trend. Stored as a JSON array in data/transfers.json and
+    // passed through to the frontend verbatim (it computes the per-day correction).
+    const char* const kTransfersPath = "data/transfers.json";
+
+    std::string loadInternalTransfersRaw()
+    {
+        std::ifstream f(kTransfersPath);
+        if (!f.is_open()) return "[]";
+        std::stringstream buf;
+        buf << f.rdbuf();
+        std::string s = buf.str();
+        // Trust our own writer; fall back to an empty array if the file is blank.
+        size_t a = s.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) return "[]";
+        return s;
+    }
+
+    // Append today's actual cash anchor for `account` to the persisted series.
+    void recordCashSnapshot(const std::string& account, double cash, time_t now)
+    {
+        CashHistory::State st = loadCashHistory();
+        if (CashHistory::record(st, account, cash, now))
+        {
+            saveCashHistory(st);
+        }
+    }
+
     time_t reconDayFloor(time_t t)
     {
         return t <= 0 ? 0 : t - (t % 86400);
@@ -1848,6 +1907,23 @@ namespace
                 << "\"value\":" << jsonNumber(sorted[i].value) << ","
                 << "\"last_updated\":" << static_cast<long long>(sorted[i].last_updated)
                 << "}";
+        }
+        out << "]";
+        return out.str();
+    }
+
+    // Serialize a persisted cash-snapshot series as {date, value} points shaped
+    // like daily_values (date at market close for the day) so the frontend cash
+    // chart can consume it directly. Empty array when no history exists yet.
+    std::string serializeCashHistory(const std::vector<CashHistory::Point>& points)
+    {
+        std::ostringstream out;
+        out << "[";
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            if (i > 0) out << ",";
+            out << "{\"date\":" << static_cast<long long>(points[i].day + 16 * 3600)
+                << ",\"value\":" << jsonNumber(points[i].cash) << "}";
         }
         out << "]";
         return out.str();
@@ -2331,6 +2407,8 @@ namespace
 
         out << "{\"portfolios\":[";
 
+        const CashHistory::State cash_history = loadCashHistory();
+
         bool first = true;
         for (const auto& name : names)
         {
@@ -2390,11 +2468,14 @@ namespace
                 << "\"institution_name\":" << jsonString(institution_name) << ","
                 << "\"needs_reauth\":" << (needs_reauth ? "true" : "false") << ","
                 << "\"reauth_detected_at\":" << static_cast<long long>(reauth_detected_at) << ","
-                << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues())
+                << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues()) << ","
+                << "\"cash_daily_values\":" << serializeCashHistory(
+                       cash_history.count(name) ? cash_history.at(name)
+                                                : std::vector<CashHistory::Point>{})
                 << "}";
         }
 
-        out << "]}";
+        out << "],\"internal_transfers\":" << loadInternalTransfersRaw() << "}";
         return out.str();
     }
 
@@ -2433,6 +2514,10 @@ namespace
                                    ? fetchUsdRateForCurrency(ccy_out)
                                    : 1.0;
 
+        const CashHistory::State cash_history = loadCashHistory();
+        const std::vector<CashHistory::Point> cash_points =
+            cash_history.count(name) ? cash_history.at(name) : std::vector<CashHistory::Point>{};
+
         std::ostringstream out;
         out << "{"
             << "\"name\":" << jsonString(name) << ","
@@ -2445,6 +2530,7 @@ namespace
             << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
             << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
             << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues()) << ","
+            << "\"cash_daily_values\":" << serializeCashHistory(cash_points) << ","
             << "\"transaction_count\":" << portfolio.getTransactions().size() << ","
             << "\"connection\":" << buildConnectionJson(manager, name)
             << "}";
@@ -4415,6 +4501,10 @@ namespace
         const double recon_anchor = have_anchor ? anchor_balance : tx_sum;
         rebuilt.setAvailableCapital(recon_anchor);
 
+        // Snapshot the real balance so the balance-over-time chart uses actual
+        // daily anchors instead of a tx-replay that can misdate deposits/transfers.
+        recordCashSnapshot(portfolio_name, recon_anchor, std::time(nullptr));
+
         if (!manager.savePortfolio(portfolio_name, rebuilt))
         {
             return makeJsonResponse(500, makeErrorBody("Sync succeeded but failed to save portfolio"));
@@ -4628,7 +4718,26 @@ namespace
             }
             else if (tx.type == "transfer")
             {
-                if (ticker.empty() || abs_shares <= 0.0) continue;
+                if (ticker.empty() || abs_shares <= 0.0)
+                {
+                    // Cash transfer between accounts (no shares moved on this leg).
+                    // Record it as a plain cash flow so the leg shows up in the
+                    // ledger AND the reconciliation engine can see the transfer
+                    // settle (explained delta on the source, creditSince on the
+                    // destination). available_capital is derived from balances, not
+                    // this transaction, so there is no double-count — it only adds
+                    // the previously-missing DEPOSIT/WITHDRAWAL row.
+                    if (cash != 0.0)
+                    {
+                        const TransactionType ct = cash >= 0.0
+                            ? TransactionType::DEPOSIT
+                            : TransactionType::WITHDRAWAL;
+                        rebuilt.addTransaction(tx.date, cash, ct, tx.name);
+                        running_cash += cash;
+                        ++investment_tx_imported;
+                    }
+                    continue;
+                }
                 // Share transfer with no cash movement on this side.
                 const TransactionType ttype = (tx.quantity >= 0.0)
                     ? TransactionType::TRANSFER_IN_ASSET
@@ -4705,6 +4814,10 @@ namespace
             ? cash_equiv_value + settlement_cash
             : running_cash + cash_equiv_value;
         rebuilt.setAvailableCapital(recon_anchor);
+
+        // Snapshot the actual cash anchor so the cash-over-time chart doesn't have
+        // to reconstruct it from a ledger that omits settlement-fund transfers.
+        recordCashSnapshot(portfolio_name, recon_anchor, std::time(nullptr));
 
         // Plaid only returns ~2 years of transactions, so a ticker may have SELLs
         // in our window without the matching BUYs (or only holdings with no buys at
@@ -5093,12 +5206,20 @@ namespace
                 Portfolio p;
                 if (loadPortfolioCached(manager, source, p)) source_anchor = p.getAvailableCapital();
             }
+            // Destination's balance BEFORE the money lands, so sweep() can clear the
+            // transfer once the destination anchor rises by ~amount (dest_rose).
+            double dest_anchor = 0.0;
+            {
+                Portfolio p;
+                if (loadPortfolioCached(manager, dest, p)) dest_anchor = p.getAvailableCapital();
+            }
             Reconciliation::State st = loadReconciliation();
             const time_t now = std::time(nullptr);
             const std::string id = "manual-" + std::to_string(static_cast<long long>(now))
                                    + "-" + std::to_string(st.events.size());
             const std::string result_id =
-                Reconciliation::createTransfer(st, source, dest, amount, source_anchor, now, id);
+                Reconciliation::createTransfer(st, source, dest, amount, source_anchor,
+                                               dest_anchor, now, id);
             if (!saveReconciliation(st))
             {
                 return makeJsonResponse(500, makeErrorBody("Failed to save reconciliation state"));

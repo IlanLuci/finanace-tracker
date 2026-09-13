@@ -65,9 +65,13 @@ namespace Reconciliation
     // Tunables.
     constexpr double DETECT_FLOOR = 50.0;      // ignore sub-$50 residual (dividend/MM noise)
     constexpr int    PENDING_EXPIRY_DAYS = 7;  // unconfirmed events auto-dismiss to deposit
-    constexpr int    TRANSFER_EXPIRY_DAYS = 14; // held transfers auto-clear as a backstop
+    constexpr int    TRANSFER_EXPIRY_BUSINESS_DAYS = 3; // held transfers auto-clear backstop
 
     double tolerance(double amount);           // max($1, 0.5% of |amount|)
+
+    // Whole weekdays (Mon-Fri, UTC) elapsed in (from, to]. Zero if to <= from.
+    // Used for the transfer backstop so a weekend doesn't count as settlement time.
+    int businessDaysBetween(time_t from, time_t to);
 
     // Detection. Call once per account sync with the freshly-computed cash
     // anchor and the ledger-explained cash delta since the prior snapshot.
@@ -85,10 +89,14 @@ namespace Reconciliation
     bool classifyDeposit(State& state, const std::string& event_id, time_t now);
 
     // Manually record an already-known in-flight transfer (predates tracking).
+    // dest_anchor_now is the destination's current cash anchor at creation, i.e.
+    // its balance BEFORE the money lands; sweep() clears the transfer once the
+    // destination anchor rises by ~amount above it (see "dest_rose"). Pass 0 when
+    // unknown to disable that signal (the source-drop and backstop paths remain).
     std::string createTransfer(State& state, const std::string& source_account,
                                const std::string& dest_account, double amount,
-                               double source_anchor_now, time_t now,
-                               const std::string& event_id);
+                               double source_anchor_now, double dest_anchor_now,
+                               time_t now, const std::string& event_id);
 
     // Injected read-time view of current account state, used by sweep().
     struct AnchorLookup

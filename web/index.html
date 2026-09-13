@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="styles.css?v=20260805d" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js" defer></script>
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
-  <script src="app.js?v=20260910d" defer></script>
+  <script src="app.js?v=20260913j" defer></script>
 </head>
 <body>
   <div id="globalProgressBar" class="global-progress" role="progressbar" aria-label="Refreshing data" hidden><span></span></div>
@@ -234,6 +234,10 @@
           <div class="panel-head">
             <h3>Portfolio Value</h3>
             <div class="chart-tools">
+              <select id="portfolioChartModeSelect" class="graph-period-select" aria-label="Chart value mode" hidden>
+                <option value="total" selected>Total</option>
+                <option value="positions">Investments</option>
+              </select>
               <select id="portfolioPeriodSelect" class="graph-period-select" aria-label="Portfolio chart period">
                 <option value="1M">1M</option>
                 <option value="3M">3M</option>

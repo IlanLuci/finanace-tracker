@@ -34,6 +34,21 @@ namespace Reconciliation
         return pct > 1.0 ? pct : 1.0;
     }
 
+    int businessDaysBetween(time_t from, time_t to)
+    {
+        if (to <= from) return 0;
+        // 1970-01-01 (day index 0) was a Thursday, i.e. tm_wday == 4.
+        const long d0 = static_cast<long>(from / 86400);
+        const long d1 = static_cast<long>(to / 86400);
+        int count = 0;
+        for (long d = d0 + 1; d <= d1; ++d)
+        {
+            const int wday = static_cast<int>(((d % 7) + 4) % 7); // 0=Sun .. 6=Sat
+            if (wday != 0 && wday != 6) ++count;
+        }
+        return count;
+    }
+
     namespace
     {
         Event* findEvent(State& state, const std::string& id)
@@ -97,8 +112,8 @@ namespace Reconciliation
 
     std::string createTransfer(State& state, const std::string& source_account,
                                const std::string& dest_account, double amount,
-                               double source_anchor_now, time_t now,
-                               const std::string& event_id)
+                               double source_anchor_now, double dest_anchor_now,
+                               time_t now, const std::string& event_id)
     {
         // Idempotent: never hold out the same in-flight transfer twice. If an
         // active transfer for this source/dest/amount already exists, return it.
@@ -119,7 +134,9 @@ namespace Reconciliation
         e.dest_account = dest_account;
         e.amount = amount;
         e.detected_at = now;
-        e.dest_anchor_at_detection = 0.0;   // unknown for a manual seed
+        // Destination balance BEFORE the money lands; sweep() clears once the
+        // anchor rises by ~amount above it. 0 means unknown (signal disabled).
+        e.dest_anchor_at_detection = dest_anchor_now;
         e.status = EventStatus::Transfer;
         e.source_account = source_account;
         e.source_anchor_at_confirm = source_anchor_now;
@@ -159,6 +176,21 @@ namespace Reconciliation
                     continue;
                 }
 
+                // The destination's balance rose by ~amount since the transfer was
+                // recorded — the money landed even though no cash transaction posted
+                // (e.g. an inter-brokerage move that only shifts settlement-fund cash,
+                // which the investment sync folds into balances rather than the ledger).
+                // Requires a known baseline; dest_anchor_at_detection == 0 disables it.
+                if (e.dest_anchor_at_detection > 0.0 && lookup.anchor(e.dest_account, cur) &&
+                    cur >= e.dest_anchor_at_detection + e.amount - tol)
+                {
+                    e.status = EventStatus::Cleared;
+                    e.cleared_at = now;
+                    e.clear_reason = "dest_rose";
+                    changed = true;
+                    continue;
+                }
+
                 // The credit reverted (transfer cancelled at the destination).
                 if (e.dest_anchor_at_detection > 0.0 && lookup.anchor(e.dest_account, cur) &&
                     cur <= e.dest_anchor_at_detection - e.amount + tol)
@@ -170,8 +202,9 @@ namespace Reconciliation
                     continue;
                 }
 
-                // Backstop.
-                if (now - e.detected_at > (time_t)TRANSFER_EXPIRY_DAYS * 86400)
+                // Backstop: give the transfer a few business days to settle, then
+                // assume it landed (weekends don't count as settlement time).
+                if (businessDaysBetween(e.detected_at, now) >= TRANSFER_EXPIRY_BUSINESS_DAYS)
                 {
                     e.status = EventStatus::Cleared;
                     e.cleared_at = now;

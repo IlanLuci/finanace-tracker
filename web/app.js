@@ -310,7 +310,9 @@ const state = {
   allTransactions: {},
   monthlyShowAll: false,
   inTransit: { total: 0, entries: [] },
-  reconciliation: { held_out_total: 0, events: [], accounts: [] }
+  reconciliation: { held_out_total: 0, events: [], accounts: [] },
+  internalTransfers: [],
+  detailChartMode: "total"
 };
 
 const el = {
@@ -375,6 +377,7 @@ const el = {
   apiResetBtn: document.getElementById("apiResetBtn"),
   apiStatus: document.getElementById("apiStatus"),
   portfolioPeriodSelect: document.getElementById("portfolioPeriodSelect"),
+  portfolioChartModeSelect: document.getElementById("portfolioChartModeSelect"),
   marketStateChip: document.getElementById("marketStateChip"),
   portfolioLastUpdatedChip: document.getElementById("portfolioLastUpdatedChip"),
   portfolioChangeChip: document.getElementById("portfolioChangeChip"),
@@ -1279,10 +1282,63 @@ function mergeDailySeries(portfolios) {
   return out;
 }
 
+// Overlay backend-persisted daily balance snapshots (data/cash_history.json) ON
+// TOP of a reconstructed base series. Snapshots are real Plaid balances captured
+// at sync time (and backfilled from the nightly backups), so they're
+// authoritative for the days they cover; the base only fills the gaps (days with
+// no snapshot, e.g. before backfill coverage begins) so those days don't drop out
+// of the merged series. The current day is pinned to the live value. Used for
+// brokerage cash AND for cash-account balances, both of which the tx-replay
+// reconstruction can get wrong (settlement-fund moves, misdated transfers).
+//
+// Before the earliest snapshot the base is RE-ANCHORED to that first real balance:
+// the raw base is anchored at TODAY's balance (walked back through transactions),
+// which flat-fills today's level where the ledger can't see the moves. Shifting it
+// so it meets the earliest real snapshot estimates pre-coverage days from the true
+// balance walked back through whatever transactions do exist — removing the seam.
+function overlayCashSnapshots(base, snapshots, liveValue) {
+  const snaps = (Array.isArray(snapshots) ? snapshots : [])
+    .map((pt) => ({ day: Math.floor(safeNumber(pt?.date) / 86400), value: safeNumber(pt?.value) }))
+    .filter((pt) => pt.day > 0)
+    .sort((a, b) => a.day - b.day);
+  if (!snaps.length) return base;
+
+  const basePairs = (base || [])
+    .map((pt) => ({ day: Math.floor(safeNumber(pt?.date) / 86400), value: safeNumber(pt?.value) }))
+    .filter((pt) => pt.day > 0)
+    .sort((a, b) => a.day - b.day);
+  const earliestDay = snaps[0].day;
+  // base value forward-filled to the earliest-snapshot day (its anchor level there)
+  let baseAtEarliest = basePairs.length ? basePairs[0].value : 0;
+  for (const p of basePairs) { if (p.day <= earliestDay) baseAtEarliest = p.value; else break; }
+  const anchorOffset = snaps[0].value - baseAtEarliest;
+
+  const byDay = new Map();
+  basePairs.forEach((pt) => {
+    byDay.set(pt.day, pt.day < earliestDay ? pt.value + anchorOffset : pt.value);
+  });
+  snaps.forEach((pt) => byDay.set(pt.day, pt.value)); // real snapshot wins
+  if (Number.isFinite(Number(liveValue))) {
+    byDay.set(Math.floor(Date.now() / 1000 / 86400), safeNumber(liveValue));
+  }
+
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([day, value]) => ({ date: day * 86400 + 16 * 3600, value }));
+}
+
 function buildBrokerageCashSeries(portfolio) {
-  // Mirror market_data_sync.cpp:recomputePortfolioDailyValues — backend doesn't
-  // persist a cash-only series for brokerages, so we rebuild it from txs here.
+  // Base spans the account's whole history (a point on every tx day), so it
+  // always provides coverage; real snapshots correct it where available.
+  const base = reconstructBrokerageCashFromTxs(portfolio);
+  return overlayCashSnapshots(base, portfolio?.cash_daily_values, portfolio?.available_capital);
+}
+
+function reconstructBrokerageCashFromTxs(portfolio) {
+  // Mirror market_data_sync.cpp — rebuild the cash-only series from txs.
   // initial_cash = current available_capital − Σ(non-cash-neutral tx.amount).
+  // Flat where transfers are missing from the ledger, but correct for brokers
+  // whose cash moves do post as transactions.
   const txs = (state.allTransactions || {})[portfolio.name] || [];
   const isCashNeutral = (t) => {
     const u = String(t || "").toUpperCase();
@@ -1324,12 +1380,12 @@ function buildBrokerageCashSeries(portfolio) {
 
 function buildBrokeragePositionsSeries(portfolio) {
   // Share value only = whole-account daily value − uninvested cash, aligned by
-  // day. A brokerage/crypto account's daily_values track the total close value
-  // (positions + cash); subtracting the synthesized cash series leaves just the
-  // holdings. Both inputs are sparse (account value on market closes, cash on tx
-  // days), so carry each forward across the union of days before subtracting.
+  // day. Use the REAL total (cash-corrected) so we subtract the SAME cash series
+  // we compute below; subtracting real cash from the reconstructed total would
+  // leave a (recon − real) cash error in the positions line. Both inputs are
+  // sparse, so carry each forward across the union of days before subtracting.
   const totalByDay = new Map();
-  (portfolio.daily_values || [])
+  realBrokerageTotalSeries(portfolio)
     .map((pt) => ({ day: Math.floor(safeNumber(pt?.date) / 86400), value: safeNumber(pt?.value) }))
     .filter((pt) => pt.day > 0)
     .sort((a, b) => a.day - b.day)
@@ -1355,6 +1411,73 @@ function buildBrokeragePositionsSeries(portfolio) {
   return out;
 }
 
+// A brokerage's persisted daily_values reconstruct the total using flat/current
+// cash (the ledger can't see settlement-fund moves), so historical totals are off
+// by (real cash − reconstructed cash). Swap in the real cash to get the true daily
+// total: real_total = reconstructed_total − reconstructed_cash + real_cash.
+function realBrokerageTotalSeries(portfolio) {
+  const toPairs = (s) => (s || [])
+    .map((pt) => [Math.floor(safeNumber(pt?.date) / 86400), safeNumber(pt?.value)])
+    .filter(([d]) => d > 0)
+    .sort((a, b) => a[0] - b[0]);
+  const total = toPairs(portfolio.daily_values);   // reconstructed total (holdings + recon cash)
+  if (!total.length) return portfolio.daily_values || [];
+  const recon = toPairs(reconstructBrokerageCashFromTxs(portfolio)); // recon cash
+  const real = toPairs(buildBrokerageCashSeries(portfolio));         // real cash (snapshots)
+  const filled = (pairs, day) => {
+    let v = pairs.length ? pairs[0][1] : 0;
+    for (const [d, val] of pairs) { if (d <= day) v = val; else break; }
+    return v;
+  };
+  // Iterate the UNION of total-days and real-cash-days: real cash can change on a
+  // day with no holdings update (weekend transfer), and forward-filling the total
+  // alone would carry a stale cash correction. holdings = total − recon cash;
+  // real total = holdings + real cash, evaluated on every day either input moves.
+  const days = Array.from(new Set([...total.map((p) => p[0]), ...real.map((p) => p[0])]))
+    .sort((a, b) => a - b);
+  return days.map((day) => {
+    const holdings = filled(total, day) - filled(recon, day);
+    return { date: day * 86400 + 16 * 3600, value: holdings + filled(real, day) };
+  });
+}
+
+// For the Total Assets view, use each account's TRUE daily total: cash accounts
+// already carry real balances (normalizePortfolios), and brokerages get their
+// cash portion corrected. Debt is left as-is (small, and its snapshot is unsigned).
+function withRealAccountTotals(portfolios) {
+  return (portfolios || []).map((p) => {
+    if (isCashPortfolio(p) || isDebtPortfolio(p)) return p;
+    return { ...p, daily_values: realBrokerageTotalSeries(p) };
+  });
+}
+
+// Net Total-Assets correction on a given day from confirmed own-account transfers,
+// so an internal move never bumps or dips the line. A transfer that LEAVES its
+// source before it LANDS is briefly counted nowhere → add it back; one that lands
+// before the source releases it is briefly counted twice → subtract it. Outside a
+// transfer's [out,in] gap the money sits in exactly one account, so no correction.
+function transferCorrectionForDay(dayFloorSec) {
+  let corr = 0;
+  (Array.isArray(state.internalTransfers) ? state.internalTransfers : []).forEach((t) => {
+    const amt = Number(t?.amount) || 0;
+    const out = Number(t?.out_day) || 0;
+    const ind = Number(t?.in_day) || 0;
+    if (!amt || !out || !ind || out === ind) return;
+    const lo = Math.min(out, ind);
+    const hi = Math.max(out, ind);
+    if (dayFloorSec >= lo && dayFloorSec < hi) corr += out < ind ? amt : -amt;
+  });
+  return corr;
+}
+
+function applyTransferCorrections(series) {
+  if (!(Array.isArray(state.internalTransfers) && state.internalTransfers.length)) return series;
+  return (series || []).map((pt) => {
+    const dayFloor = Math.floor(safeNumber(pt?.date) / 86400) * 86400;
+    return { ...pt, value: safeNumber(pt?.value) + transferCorrectionForDay(dayFloor) };
+  });
+}
+
 function portfoliosForDashboardScope(accountPortfolios, scope) {
   switch (scope) {
     case "INVEST":
@@ -1376,7 +1499,8 @@ function portfoliosForDashboardScope(accountPortfolios, scope) {
           return { ...p, daily_values: buildBrokerageCashSeries(p) };
         });
     default:
-      return accountPortfolios;
+      // Total Assets = each account's true daily total (brokerage cash corrected).
+      return withRealAccountTotals(accountPortfolios);
   }
 }
 
@@ -1564,27 +1688,43 @@ function normalizePortfolios(rawPortfolios) {
 
   return rawPortfolios
     .filter((p) => p && typeof p === "object" && typeof p.name === "string" && p.name.trim() !== "")
-    .map((p) => ({
-      ...p,
-      name: String(p.name),
-      type: String(p.type || "UNKNOWN"),
-      currency: String(p.currency || "USD").toUpperCase(),
-      fx_to_usd: Number.isFinite(Number(p.fx_to_usd)) && Number(p.fx_to_usd) > 0 ? Number(p.fx_to_usd) : 1,
-      available_capital: safeNumber(p.available_capital),
-      estimated_total_value: safeNumber(p.estimated_total_value),
-      reported_total_value: safeNumber(p.reported_total_value),
-      day_change_amount: safeNumber(p.day_change_amount),
-      day_change_percent: safeNumber(p.day_change_percent),
-      stock_count: safeNumber(p.stock_count),
-      transaction_count: safeNumber(p.transaction_count),
-      daily_values: Array.isArray(p.daily_values)
-        ? p.daily_values.map((point) => ({
-            date: safeNumber(point?.date),
-            value: safeNumber(point?.value),
-            last_updated: safeNumber(point?.last_updated)
-          }))
-        : []
-    }));
+    .map((p) => {
+      const normalized = {
+        ...p,
+        name: String(p.name),
+        type: String(p.type || "UNKNOWN"),
+        currency: String(p.currency || "USD").toUpperCase(),
+        fx_to_usd: Number.isFinite(Number(p.fx_to_usd)) && Number(p.fx_to_usd) > 0 ? Number(p.fx_to_usd) : 1,
+        available_capital: safeNumber(p.available_capital),
+        estimated_total_value: safeNumber(p.estimated_total_value),
+        reported_total_value: safeNumber(p.reported_total_value),
+        day_change_amount: safeNumber(p.day_change_amount),
+        day_change_percent: safeNumber(p.day_change_percent),
+        stock_count: safeNumber(p.stock_count),
+        transaction_count: safeNumber(p.transaction_count),
+        daily_values: Array.isArray(p.daily_values)
+          ? p.daily_values.map((point) => ({
+              date: safeNumber(point?.date),
+              value: safeNumber(point?.value),
+              last_updated: safeNumber(point?.last_updated)
+            }))
+          : []
+      };
+      // For a standalone CASH account, balance IS the whole value — and its
+      // daily_values are a tx-replay that can misdate deposits/transfers. Overlay
+      // the real balance snapshots so BOTH the total and cash trends use actual
+      // daily anchors. (Brokerages keep daily_values for their total; their cash
+      // portion is corrected separately in the Cash view via buildBrokerageCashSeries.
+      // Debt is left alone — its snapshot is a positive balance, not a signed value.)
+      if (isCashPortfolio(normalized) && Array.isArray(p.cash_daily_values) && p.cash_daily_values.length) {
+        normalized.daily_values = overlayCashSnapshots(
+          normalized.daily_values,
+          p.cash_daily_values,
+          normalized.available_capital
+        );
+      }
+      return normalized;
+    });
 }
 
 function destroyChart(name) {
@@ -1866,7 +2006,9 @@ function renderDashboard() {
   // `portfolios` is already in-flight-transfer-corrected (see
   // applyReconciliationToPortfolios), so every aggregate below — total, trend,
   // day change, cash — is consistent by construction.
-  const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0);
+  const todayFloor = Math.floor(Date.now() / 1000 / 86400) * 86400;
+  const totalAssets = accountPortfolios.reduce((sum, p) => sum + (p.estimated_total_value || 0), 0)
+    + transferCorrectionForDay(todayFloor);
   const heldOutTotal = Number(state.reconciliation?.held_out_total) || 0;
   // We surface unmatched transfer outflows in the subline but no longer add
   // them back to the total — the in-transit pile mixes own-account transfers
@@ -1883,10 +2025,10 @@ function renderDashboard() {
     return sum + (p.available_capital || 0) * fx;
   }, 0);
   const totalStocks = accountPortfolios.reduce((sum, p) => sum + (p.stock_count || 0), 0);
-  const aggregateTrend = shiftTrendSeries(
-    mergeDailySeries(accountPortfolios),
-    heldOutForPortfolios(accountPortfolios)
-  );
+  const aggregateTrend = applyTransferCorrections(shiftTrendSeries(
+    mergeDailySeries(withRealAccountTotals(accountPortfolios)),
+    heldOutEntriesForPortfolios(accountPortfolios)
+  ));
   // Day Change tracks the chart: live total vs. the most recent prior-day
   // snapshot. This includes deposits/withdrawals/transfers, matching what
   // the line on the dashboard chart reflects.
@@ -2118,10 +2260,15 @@ function renderDashboard() {
 
   const drawDashboardChart = () => {
     const scopedPortfolios = portfoliosForDashboardScope(accountPortfolios, state.dashboardScope);
-    const scopedAggregate = shiftTrendSeries(
+    let scopedAggregate = shiftTrendSeries(
       mergeDailySeries(scopedPortfolios),
-      heldOutForPortfolios(scopedPortfolios)
+      heldOutEntriesForPortfolios(scopedPortfolios)
     );
+    // Internal transfers move cash between accounts, so they distort the Total and
+    // Cash lines during the in-flight gap, but not the holdings-only Invest line.
+    if (state.dashboardScope !== "INVEST") {
+      scopedAggregate = applyTransferCorrections(scopedAggregate);
+    }
     const filtered = filterPointsByPeriod(scopedAggregate, state.periods.dashboard);
     const trend = computeTrend(filtered);
     const color = trendColor(trend.percentChange);
@@ -2164,12 +2311,30 @@ function renderDashboard() {
   }
 }
 
+// Daily series for the detail chart, corrected to real balances and honoring the
+// Total-value vs Investments-only mode for brokerage/crypto accounts.
+function detailChartSeries(portfolio) {
+  const invest = !isCashPortfolio(portfolio) && !isDebtPortfolio(portfolio) && !isWatchlistPortfolio(portfolio);
+  if (invest) {
+    return state.detailChartMode === "positions"
+      ? buildBrokeragePositionsSeries(portfolio)   // holdings only
+      : realBrokerageTotalSeries(portfolio);        // holdings + real cash (reflects deposits/withdrawals)
+  }
+  if (isCashPortfolio(portfolio)) {
+    // Balance IS the value; overlay real snapshots so deposits/withdrawals land on
+    // the right day instead of the tx-replay's misdated reconstruction.
+    return overlayCashSnapshots(portfolio.daily_values || [], portfolio.cash_daily_values,
+                                portfolio.available_capital);
+  }
+  return portfolio.daily_values || [];
+}
+
 function renderPortfolioChart() {
   if (!state.currentPortfolio) {
     return;
   }
 
-  const points = filterPointsByPeriod(state.currentPortfolio.daily_values || [], state.periods.portfolio);
+  const points = filterPointsByPeriod(detailChartSeries(state.currentPortfolio), state.periods.portfolio);
   const trend = computeTrend(points);
   const color = trendColor(trend.percentChange);
 
@@ -2178,11 +2343,12 @@ function renderPortfolioChart() {
     ? `Change: ${percentage(trend.percentChange)}`
     : "Change: n/a";
 
+  const modeLabel = state.detailChartMode === "positions" ? "Investments" : "Total";
   destroyChart("portfolio");
   state.charts.portfolio = createLineChart(
     el.portfolioChart,
     points,
-    `${portfolioDisplayName(state.currentPortfolio.name)} Value`,
+    `${portfolioDisplayName(state.currentPortfolio.name)} ${modeLabel}`,
     color
   );
 }
@@ -2502,6 +2668,18 @@ function renderPortfolioDetail(portfolio, stocks, recentTransactions) {
     setChartPeriod("portfolio", state.periods.portfolio);
     renderPortfolioChart();
   };
+
+  // Total-value vs Investments-only toggle — only meaningful for accounts that
+  // hold positions AND cash (brokerage/crypto). Cash/debt/watchlist have no split.
+  const showModeToggle = !cash && !debt && !watchlist;
+  if (el.portfolioChartModeSelect) {
+    el.portfolioChartModeSelect.hidden = !showModeToggle;
+    el.portfolioChartModeSelect.value = state.detailChartMode;
+    el.portfolioChartModeSelect.onchange = (event) => {
+      state.detailChartMode = event.target.value;
+      renderPortfolioChart();
+    };
+  }
 
   const allocationPanel = el.portfolioAllocationChart?.closest(".allocation-panel");
   const chartPanel = el.portfolioChart?.closest(".chart-panel");
@@ -4727,6 +4905,7 @@ async function submitTransactionForm(event) {
       try {
         const latestSummary = await apiGet("/api/portfolios");
         state.portfolios = normalizePortfolios(latestSummary.portfolios);
+        state.internalTransfers = Array.isArray(latestSummary.internal_transfers) ? latestSummary.internal_transfers : [];
         refreshAllTransactionsForDashboard();
         await openPortfolio(portfolioName);
         showFlash("Transaction recorded successfully.", "success");
@@ -4813,6 +4992,7 @@ async function submitCreatePortfolioForm(event) {
 
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
+    state.internalTransfers = Array.isArray(payload.internal_transfers) ? payload.internal_transfers : [];
     renderDashboard();
     showDashboard();
 
@@ -4848,6 +5028,7 @@ async function confirmDeleteAccount() {
 
     const payload = await apiGet("/api/portfolios");
     state.portfolios = normalizePortfolios(payload.portfolios);
+    state.internalTransfers = Array.isArray(payload.internal_transfers) ? payload.internal_transfers : [];
     renderDashboard();
     showDashboard();
 
@@ -4897,12 +5078,21 @@ function heldOutByNameMap() {
   return map;
 }
 
-// Total held-out attributable to the accounts in `portfolios` (so a scoped
-// chart that excludes the source account isn't wrongly reduced).
-function heldOutForPortfolios(portfolios) {
-  const map = heldOutByNameMap();
-  if (!map.size) return 0;
-  return (portfolios || []).reduce((sum, p) => sum + (map.get(p?.name) || 0), 0);
+// Active in-flight transfer hold-outs charged to `portfolios`, as {since, amount}
+// entries where `since` is the transfer's detection time. Lets the trend chart be
+// shifted only from each transfer forward, instead of dropping the whole line.
+function heldOutEntriesForPortfolios(portfolios) {
+  const names = new Set((portfolios || []).map((p) => String(p?.name || "")));
+  const entries = [];
+  (state.reconciliation?.events || []).forEach((e) => {
+    if (String(e?.status) !== "transfer") return;
+    const src = String(e?.source_account || "");
+    const amount = Number(e?.amount) || 0;
+    if (src && amount > 0 && names.has(src)) {
+      entries.push({ since: safeNumber(e?.detected_at), amount });
+    }
+  });
+  return entries;
 }
 
 // Reduce each source account's CURRENT value (cash + estimated total) by the
@@ -4925,12 +5115,22 @@ function applyReconciliationToPortfolios(portfolios) {
   });
 }
 
-// Flat-shift a merged trend series down by `offset` (the in-flight hold-out).
-// Preserves the line's shape so day-over-day change stays market-driven while
-// the current endpoint matches the corrected Total Assets card.
-function shiftTrendSeries(series, offset) {
-  if (!offset) return series;
-  return (series || []).map((pt) => ({ ...pt, value: safeNumber(pt?.value) - offset }));
+// Shift a merged trend series down by in-flight hold-outs. Each {since, amount}
+// entry is applied only to points dated on/after `since`, so history from before
+// a transfer existed (when the money legitimately sat in the source account) is
+// left untouched. This keeps the line's shape and the current endpoint matched to
+// the corrected Total Assets card, without dropping the whole historical line.
+function shiftTrendSeries(series, entries) {
+  const list = Array.isArray(entries) ? entries.filter((e) => (Number(e?.amount) || 0) > 0) : [];
+  if (!list.length) return series;
+  return (series || []).map((pt) => {
+    const d = safeNumber(pt?.date);
+    let offset = 0;
+    for (const e of list) {
+      if (d >= safeNumber(e.since)) offset += Number(e.amount) || 0;
+    }
+    return { ...pt, value: safeNumber(pt?.value) - offset };
+  });
 }
 
 // Correct a single account's detail payload for an in-flight transfer so its
@@ -4939,8 +5139,12 @@ function shiftTrendSeries(series, offset) {
 function applyReconciliationToDetail(portfolio) {
   const amount = heldOutByNameMap().get(portfolio?.name) || 0;
   if (!amount) return portfolio;
-  const dailyValues = (Array.isArray(portfolio?.daily_values) ? portfolio.daily_values : [])
-    .map((pt) => ({ ...pt, value: safeNumber(pt?.value) - amount }));
+  // Reduce the current value by the full hold-out, but shift the daily series
+  // only from each transfer's detection date forward (see shiftTrendSeries).
+  const dailyValues = shiftTrendSeries(
+    Array.isArray(portfolio?.daily_values) ? portfolio.daily_values : [],
+    heldOutEntriesForPortfolios([portfolio])
+  );
   return {
     ...portfolio,
     available_capital: safeNumber(portfolio?.available_capital) - amount,
@@ -4958,6 +5162,7 @@ async function loadDashboard() {
       refreshReconciliation()
     ]);
     state.portfolios = normalizePortfolios(payload.portfolios);
+    state.internalTransfers = Array.isArray(payload.internal_transfers) ? payload.internal_transfers : [];
     refreshAllTransactionsForDashboard();
     renderDashboard();
     startDashboardLiveRefreshTimer();
