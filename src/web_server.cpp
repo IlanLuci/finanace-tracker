@@ -1503,8 +1503,11 @@ namespace
 
     // Detection hook: run at the end of a successful account sync. `new_anchor`
     // is the freshly-set cash anchor (captured before any later ledger edits).
+    // `kind` gates prompting: only Cash (depository) accounts raise an
+    // unexplained-credit prompt (see Reconciliation::AccountKind).
     void reconciliationObserveSync(const std::string& portfolio_name,
-                                   const Portfolio& rebuilt, double new_anchor)
+                                   const Portfolio& rebuilt, double new_anchor,
+                                   Reconciliation::AccountKind kind)
     {
         Reconciliation::State st = loadReconciliation();
         const time_t now = std::time(nullptr);
@@ -1519,7 +1522,7 @@ namespace
         }
         const std::string event_id = portfolio_name + "-" + std::to_string((long long)now)
                                      + "-" + std::to_string(rebuilt.getTransactions().size());
-        Reconciliation::observe(st, portfolio_name, new_anchor, explained_delta, now, event_id);
+        Reconciliation::observe(st, portfolio_name, new_anchor, explained_delta, now, event_id, kind);
         saveReconciliation(st);
     }
 
@@ -4451,8 +4454,16 @@ namespace
         // the transaction sum (legacy behavior) if no balance is available.
         double anchor_balance = 0.0;
         bool have_anchor = false;
+        // Credit cards route through this cash path too; classify so the
+        // reconciliation hook never prompts on a card (a payment/refund is not
+        // an in-flight cash transfer).
+        Reconciliation::AccountKind recon_kind = Reconciliation::AccountKind::Cash;
         for (const auto& a : accounts_summary)
         {
+            if (a.account_id == conn.account_id)
+            {
+                if (a.type == "credit") recon_kind = Reconciliation::AccountKind::Credit;
+            }
             if (a.account_id == conn.account_id && a.has_balance)
             {
                 anchor_balance = a.current_balance;
@@ -4515,7 +4526,7 @@ namespace
         }
 
         // Detect any unexplained balance movement introduced by this sync.
-        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor);
+        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor, recon_kind);
 
         const time_t now = std::time(nullptr);
         conn.last_synced = now;
@@ -5024,7 +5035,10 @@ namespace
         MarketDataSync::recomputePortfolioDailyValues(manager, portfolio_name);
 
         // Detect any unexplained balance movement introduced by this sync.
-        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor);
+        // Investment accounts never prompt (settlement-cash blips self-explain;
+        // genuine transfers use the manual createTransfer path).
+        reconciliationObserveSync(portfolio_name, rebuilt, recon_anchor,
+                                  Reconciliation::AccountKind::Investment);
 
         conn.last_synced = now;
         manager.saveConnection(portfolio_name, conn);

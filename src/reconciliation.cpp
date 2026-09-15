@@ -63,11 +63,14 @@ namespace Reconciliation
 
     std::string observe(State& state, const std::string& account,
                         double new_anchor, double explained_delta,
-                        time_t now, const std::string& new_event_id)
+                        time_t now, const std::string& new_event_id,
+                        AccountKind kind)
     {
         std::string created;
         auto it = state.snapshots.find(account);
-        if (it != state.snapshots.end())
+        // Only depository (cash) accounts prompt. Credit cards and investment
+        // accounts still advance their snapshot below, but never raise an event.
+        if (it != state.snapshots.end() && kind == AccountKind::Cash)
         {
             const double balance_delta = new_anchor - it->second.anchor;
             const double unexplained = balance_delta - explained_delta;

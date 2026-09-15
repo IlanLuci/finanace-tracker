@@ -1282,6 +1282,16 @@ small {
   padding: 0.25rem 0;
 }
 
+.manual-transfer summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.manual-transfer .chart-tools {
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .tax-search {
   width: 100%;
   margin: 0.5rem 0 0.75rem;

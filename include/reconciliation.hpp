@@ -35,6 +35,14 @@ namespace Reconciliation
     std::string statusToString(EventStatus s);
     EventStatus statusFromString(const std::string& s);
 
+    // What kind of account a sync belongs to. Only Cash (depository) accounts
+    // raise an unexplained-credit prompt: a Credit card's balance is a liability
+    // that can't receive an in-flight cash transfer, and an Investment account's
+    // settlement-cash blips (trades/dividends posting a beat after the balance)
+    // self-explain — genuine investment transfers use the manual createTransfer
+    // path. Both still snapshot their baseline; they simply never prompt.
+    enum class AccountKind { Cash, Credit, Investment };
+
     // Last-synced cash anchor for an account; the baseline for delta detection.
     struct Snapshot
     {
@@ -76,11 +84,12 @@ namespace Reconciliation
     // Detection. Call once per account sync with the freshly-computed cash
     // anchor and the ledger-explained cash delta since the prior snapshot.
     // Creates a pending event (id = new_event_id) when the unexplained credit
-    // clears DETECT_FLOOR and a prior snapshot exists. Always updates the
-    // snapshot. Returns the new event id, or "" if none created.
+    // clears DETECT_FLOOR, a prior snapshot exists, AND kind == Cash. Always
+    // updates the snapshot. Returns the new event id, or "" if none created.
     std::string observe(State& state, const std::string& account,
                         double new_anchor, double explained_delta,
-                        time_t now, const std::string& new_event_id);
+                        time_t now, const std::string& new_event_id,
+                        AccountKind kind = AccountKind::Cash);
 
     // Classification of a pending event.
     bool classifyTransfer(State& state, const std::string& event_id,

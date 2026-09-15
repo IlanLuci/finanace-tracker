@@ -72,6 +72,26 @@ int main()
         check(s.events[0].dest_account == "Roth", "dest account recorded");
     }
 
+    // 2b. Credit-card accounts never create a prompt, even for a large
+    //     unexplained swing (a card payment/refund is not a cash transfer in).
+    {
+        State s;
+        observe(s, "Card", 100.0, 0.0, T0, "b", AccountKind::Credit);          // baseline
+        std::string id = observe(s, "Card", 900.0, 0.0, T0 + DAY, "c", AccountKind::Credit); // +800
+        check(id.empty() && s.events.empty(), "credit account never prompts");
+        check(s.snapshots.count("Card") == 1, "credit account still snapshots baseline");
+    }
+
+    // 2c. Investment accounts never create a prompt (trade/dividend timing
+    //     blips self-explain; genuine transfers use the manual path).
+    {
+        State s;
+        observe(s, "Broker", 1000.0, 0.0, T0, "b", AccountKind::Investment);          // baseline
+        std::string id = observe(s, "Broker", 6700.0, 0.0, T0 + DAY, "c", AccountKind::Investment); // +5700
+        check(id.empty() && s.events.empty(), "investment account never prompts");
+        check(approx(s.snapshots["Broker"].anchor, 6700.0), "investment snapshot still advances");
+    }
+
     // 3. Sub-floor residual (e.g. dividend timing) is ignored.
     {
         State s;

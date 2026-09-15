@@ -1992,6 +1992,66 @@ async function classifyReconciliation(id, body) {
   }
 }
 
+// Collapsible form to manually record a known in-flight transfer. We no longer
+// auto-prompt on investment accounts (settlement-cash blips self-explain), so
+// this is how a genuine own-account transfer gets held out of Total Assets
+// until the source and destination balances finish settling.
+function renderManualTransferPanel() {
+  const accounts = state.reconciliation?.accounts || [];
+  if (accounts.length < 2) return "";
+  const options = accounts
+    .map((name) => `<option value="${encodeURIComponent(name)}">${escapeHtml(portfolioDisplayName(name))}</option>`)
+    .join("");
+  return `
+    <details class="panel fade-up manual-transfer">
+      <summary>Record an in-flight transfer</summary>
+      <p class="muted-note">Hold a known transfer out of Total Assets until it settles — useful when the
+        destination shows the money before the source drops (e.g. a Vanguard settlement move).</p>
+      <div class="chart-tools">
+        <select id="manualTransferSource" class="graph-period-select" aria-label="Transfer source account">
+          <option value="">From…</option>
+          ${options}
+        </select>
+        <select id="manualTransferDest" class="graph-period-select" aria-label="Transfer destination account">
+          <option value="">To…</option>
+          ${options}
+        </select>
+        <input id="manualTransferAmount" class="graph-period-select" type="number" min="0" step="0.01"
+          placeholder="Amount" aria-label="Transfer amount" />
+        <button id="manualTransferSubmit" class="primary-btn" type="button">Record transfer</button>
+      </div>
+    </details>`;
+}
+
+async function submitManualTransfer() {
+  const sourceEl = document.getElementById("manualTransferSource");
+  const destEl = document.getElementById("manualTransferDest");
+  const amountEl = document.getElementById("manualTransferAmount");
+  const source = sourceEl ? decodeURIComponent(sourceEl.value || "") : "";
+  const dest = destEl ? decodeURIComponent(destEl.value || "") : "";
+  const amount = Number(amountEl?.value || 0);
+  if (!source || !dest) {
+    showFlash("Pick both a source and destination account.");
+    return;
+  }
+  if (source === dest) {
+    showFlash("Source and destination must be different accounts.");
+    return;
+  }
+  if (!(amount > 0)) {
+    showFlash("Enter a transfer amount greater than zero.");
+    return;
+  }
+  try {
+    await apiPost("/api/reconciliation", { source_account: source, dest_account: dest, amount });
+    await refreshReconciliation();
+    renderDashboard();
+    showFlash("Transfer recorded and held out until it settles.", "success");
+  } catch (error) {
+    showFlash(error.message);
+  }
+}
+
 function renderDashboard() {
   const normalized = normalizePortfolios(state.portfolios);
   state.portfolios = normalized;
@@ -2140,6 +2200,7 @@ function renderDashboard() {
   el.dashboardView.innerHTML = `
     ${dashboardMetrics}
     ${renderReconciliationBanner()}
+    ${renderManualTransferPanel()}
     <article class="panel chart-panel fade-up">
       <div class="panel-head">
         <h3 id="dashboardChartTitle">${dashboardScopeTitle(state.dashboardScope)}</h3>
@@ -2213,6 +2274,11 @@ function renderDashboard() {
       classifyReconciliation(id, { status: "deposit" });
     });
   });
+
+  const manualTransferSubmit = document.getElementById("manualTransferSubmit");
+  if (manualTransferSubmit) {
+    manualTransferSubmit.addEventListener("click", submitManualTransfer);
+  }
 
   document.querySelectorAll(".portfolio-card").forEach((card) => {
     card.addEventListener("click", (event) => {
