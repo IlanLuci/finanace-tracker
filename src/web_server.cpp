@@ -2399,6 +2399,429 @@ namespace
         return shares_owned;
     }
 
+    // ---- Dashboard total day-change (server-side mirror of app.js) ----------
+    // The browser new-tab extension needs the SAME "Day Change" the dashboard
+    // shows. That number is a snapshot diff (live Total Assets - most-recent
+    // prior-day total) over a corrected aggregate trend, not the market-only
+    // per-portfolio day_change_amount. Rather than have every consumer re-derive
+    // the correction chain (and drift), we compute the live-INDEPENDENT pieces
+    // here and expose them as top-level fields; the client finishes with its own
+    // live Total Assets sum. Every function below is a faithful port of the
+    // like-named function in web/app.js so the two produce identical numbers.
+    namespace dashtotals
+    {
+        using DayPair = std::pair<long long, double>; // (day bucket, value)
+        using Series = std::vector<DayPair>;
+        constexpr long long kCloseOffset = 16 * 3600; // dayToSecondsAtClose in app.js
+
+        struct AccountInput
+        {
+            std::string name;
+            PortfolioType type = PortfolioType::BROKERAGE;
+            double available_capital = 0.0;
+            double fx = 1.0; // fx_to_usd; non-1 only for foreign-currency CASH
+            double estimated_total_value = 0.0; // signed (DEBT already negative)
+            std::vector<DailyPortfolioValue> daily_values;
+            std::vector<CashHistory::Point> cash_points;
+            std::vector<Transaction> transactions;
+        };
+
+        struct InternalTransfer
+        {
+            double amount = 0.0;
+            long long out_day = 0; // seconds (day floor)
+            long long in_day = 0;  // seconds (day floor)
+        };
+
+        struct HeldOutEntry
+        {
+            time_t since = 0;
+            double amount = 0.0;
+        };
+
+        struct Totals
+        {
+            double total_assets = 0.0;
+            bool has_previous = false;
+            double previous_day_total = 0.0;
+            double today_transfer_correction = 0.0;
+            double held_out_total = 0.0;
+            double total_day_change = 0.0;
+            double total_day_change_percent = 0.0;
+        };
+
+        Series sortedByDay(Series pairs)
+        {
+            std::sort(pairs.begin(), pairs.end(),
+                      [](const DayPair& a, const DayPair& b) { return a.first < b.first; });
+            return pairs;
+        }
+
+        // Collapse to one point per day (later same-day entry wins), then sort.
+        Series byDayLastWins(const Series& pairs)
+        {
+            std::map<long long, double> by_day;
+            for (const auto& p : pairs)
+            {
+                if (p.first > 0) by_day[p.first] = p.second;
+            }
+            Series out(by_day.begin(), by_day.end());
+            return out;
+        }
+
+        Series dailyToPairs(const std::vector<DailyPortfolioValue>& values)
+        {
+            Series out;
+            out.reserve(values.size());
+            for (const auto& v : values)
+            {
+                const long long day = dayBucketForTimestamp(v.date);
+                if (day > 0) out.emplace_back(day, v.value);
+            }
+            return sortedByDay(out);
+        }
+
+        Series cashToPairs(const std::vector<CashHistory::Point>& points)
+        {
+            Series out;
+            out.reserve(points.size());
+            for (const auto& p : points)
+            {
+                const long long day = dayBucketForTimestamp(p.day);
+                if (day > 0) out.emplace_back(day, p.cash);
+            }
+            return sortedByDay(out);
+        }
+
+        bool isCashNeutral(TransactionType t)
+        {
+            return t == TransactionType::TRANSFER_IN_ASSET ||
+                   t == TransactionType::TRANSFER_OUT_ASSET;
+        }
+
+        // Port of reconstructBrokerageCashFromTxs: rebuild the cash-only series
+        // from txs. initial_cash = current available_capital - sum(non-neutral tx).
+        Series reconstructCash(const AccountInput& a, time_t now)
+        {
+            std::vector<Transaction> txs = a.transactions;
+            std::sort(txs.begin(), txs.end(),
+                      [](const Transaction& l, const Transaction& r) { return l.date < r.date; });
+
+            double sum_non_neutral = 0.0;
+            for (const auto& tx : txs)
+            {
+                if (!isCashNeutral(tx.type)) sum_non_neutral += tx.amount;
+            }
+            const double initial_cash = a.available_capital - sum_non_neutral;
+            const long long today = dayBucketForTimestamp(now);
+
+            if (txs.empty())
+            {
+                if (std::abs(a.available_capital) < 1e-9) return {};
+                return { { today, a.available_capital } };
+            }
+
+            std::map<long long, double> by_day;
+            double running = initial_cash;
+            for (const auto& tx : txs)
+            {
+                if (!isCashNeutral(tx.type)) running += tx.amount;
+                const long long day = dayBucketForTimestamp(tx.date);
+                if (day > 0) by_day[day] = running;
+            }
+            if (by_day.find(today) == by_day.end()) by_day[today] = running;
+            return Series(by_day.begin(), by_day.end());
+        }
+
+        double filledAt(const Series& pairs, long long day)
+        {
+            double v = pairs.empty() ? 0.0 : pairs.front().second;
+            for (const auto& p : pairs)
+            {
+                if (p.first <= day) v = p.second;
+                else break;
+            }
+            return v;
+        }
+
+        // Port of overlayCashSnapshots. `live_value` is always finite in our
+        // callers (available_capital), so today's bucket is always overwritten.
+        Series overlayCashSnapshots(const Series& base, const Series& snaps,
+                                    double live_value, time_t now)
+        {
+            if (snaps.empty()) return base;
+            const long long earliest_day = snaps.front().first;
+
+            double base_at_earliest = base.empty() ? 0.0 : base.front().second;
+            for (const auto& p : base)
+            {
+                if (p.first <= earliest_day) base_at_earliest = p.second;
+                else break;
+            }
+            const double anchor_offset = snaps.front().second - base_at_earliest;
+
+            std::map<long long, double> by_day;
+            for (const auto& p : base)
+            {
+                by_day[p.first] = (p.first < earliest_day) ? p.second + anchor_offset : p.second;
+            }
+            for (const auto& p : snaps) by_day[p.first] = p.second; // real snapshot wins
+            by_day[dayBucketForTimestamp(now)] = live_value;
+            return Series(by_day.begin(), by_day.end());
+        }
+
+        Series brokerageCashSeries(const AccountInput& a, time_t now)
+        {
+            return overlayCashSnapshots(reconstructCash(a, now), cashToPairs(a.cash_points),
+                                        a.available_capital, now);
+        }
+
+        // Port of realBrokerageTotalSeries: swap reconstructed cash for real cash.
+        // real_total = (reconstructed_total - reconstructed_cash) + real_cash.
+        Series realBrokerageTotal(const AccountInput& a, time_t now)
+        {
+            const Series total = dailyToPairs(a.daily_values);
+            if (total.empty()) return {};
+            const Series recon = reconstructCash(a, now);
+            const Series real = brokerageCashSeries(a, now);
+
+            std::set<long long> day_set;
+            for (const auto& p : total) day_set.insert(p.first);
+            for (const auto& p : real) day_set.insert(p.first);
+
+            Series out;
+            out.reserve(day_set.size());
+            for (long long day : day_set)
+            {
+                const double holdings = filledAt(total, day) - filledAt(recon, day);
+                out.emplace_back(day, holdings + filledAt(real, day));
+            }
+            return out; // day_set is ordered → already sorted
+        }
+
+        // Port of withRealAccountTotals for a single account: the daily series it
+        // contributes to the aggregate trend. CASH mirrors normalizePortfolios'
+        // cash overlay; DEBT is left as its (positive) balance series; everything
+        // else uses the cash-corrected real total.
+        Series accountContribSeries(const AccountInput& a, time_t now)
+        {
+            if (a.type == PortfolioType::CASH)
+            {
+                const Series base = dailyToPairs(a.daily_values);
+                const Series snaps = cashToPairs(a.cash_points);
+                if (snaps.empty()) return base;
+                return overlayCashSnapshots(base, snaps, a.available_capital, now);
+            }
+            if (a.type == PortfolioType::DEBT)
+            {
+                return dailyToPairs(a.daily_values);
+            }
+            return realBrokerageTotal(a, now);
+        }
+
+        // Port of mergeDailySeries: carry each account's most recent value forward
+        // across the union of days so the aggregate has no synthetic dips.
+        Series mergeDailySeries(const std::vector<Series>& per_account)
+        {
+            std::vector<Series> series;
+            series.reserve(per_account.size());
+            std::set<long long> all_days;
+            for (const auto& s : per_account)
+            {
+                Series normalized = byDayLastWins(s);
+                for (const auto& p : normalized) all_days.insert(p.first);
+                series.push_back(std::move(normalized));
+            }
+
+            std::vector<int> cursors(series.size(), -1);
+            Series out;
+            for (long long day : all_days)
+            {
+                double total = 0.0;
+                bool any = false;
+                for (size_t i = 0; i < series.size(); ++i)
+                {
+                    int c = cursors[i];
+                    while (c + 1 < static_cast<int>(series[i].size()) &&
+                           series[i][c + 1].first <= day)
+                    {
+                        ++c;
+                    }
+                    cursors[i] = c;
+                    if (c >= 0)
+                    {
+                        total += series[i][c].second;
+                        any = true;
+                    }
+                }
+                if (any) out.emplace_back(day, total);
+            }
+            return out; // all_days ordered → sorted
+        }
+
+        // Port of transferCorrectionForDay: net Total-Assets correction on a day
+        // from confirmed own-account transfers (money briefly counted nowhere → add
+        // back; briefly counted twice → subtract).
+        double transferCorrectionForDay(long long day_floor_sec,
+                                        const std::vector<InternalTransfer>& transfers)
+        {
+            double corr = 0.0;
+            for (const auto& t : transfers)
+            {
+                if (t.amount == 0.0 || t.out_day == 0 || t.in_day == 0 || t.out_day == t.in_day)
+                {
+                    continue;
+                }
+                const long long lo = std::min(t.out_day, t.in_day);
+                const long long hi = std::max(t.out_day, t.in_day);
+                if (day_floor_sec >= lo && day_floor_sec < hi)
+                {
+                    corr += (t.out_day < t.in_day) ? t.amount : -t.amount;
+                }
+            }
+            return corr;
+        }
+
+        // Port of shiftTrendSeries: shift the merged trend down by in-flight
+        // hold-outs, applied only on/after each transfer's detection date.
+        Series shiftTrendSeries(const Series& series, const std::vector<HeldOutEntry>& entries)
+        {
+            if (entries.empty()) return series;
+            Series out;
+            out.reserve(series.size());
+            for (const auto& p : series)
+            {
+                const long long date_sec = p.first * SECONDS_PER_DAY + kCloseOffset;
+                double offset = 0.0;
+                for (const auto& e : entries)
+                {
+                    if (date_sec >= e.since) offset += e.amount;
+                }
+                out.emplace_back(p.first, p.second - offset);
+            }
+            return out;
+        }
+
+        Series applyTransferCorrections(const Series& series,
+                                        const std::vector<InternalTransfer>& transfers)
+        {
+            if (transfers.empty()) return series;
+            Series out;
+            out.reserve(series.size());
+            for (const auto& p : series)
+            {
+                const long long day_floor_sec = p.first * SECONDS_PER_DAY;
+                out.emplace_back(p.first, p.second + transferCorrectionForDay(day_floor_sec, transfers));
+            }
+            return out;
+        }
+
+        // Port of previousDistinctDayValue: most recent value from a day bucket
+        // strictly before today. Live-independent (today's bucket is excluded).
+        bool previousDistinctDayValue(const Series& aggregate, time_t now, double& out)
+        {
+            const Series sorted = sortedByDay(aggregate);
+            const long long reference_bucket = dayBucketForTimestamp(now);
+            for (auto it = sorted.rbegin(); it != sorted.rend(); ++it)
+            {
+                if (it->first < reference_bucket)
+                {
+                    out = it->second;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::vector<InternalTransfer> parseInternalTransfers(const std::string& raw)
+        {
+            std::vector<InternalTransfer> out;
+            JsonParser parser(raw);
+            std::optional<JsonValue> parsed = parser.parseValue();
+            if (!parsed.has_value() || parsed->type != JsonType::ARRAY) return out;
+            for (const JsonValue& el : parsed->array_value)
+            {
+                if (el.type != JsonType::OBJECT) continue;
+                InternalTransfer t;
+                auto amt = el.object_value.find("amount");
+                auto out_it = el.object_value.find("out_day");
+                auto in_it = el.object_value.find("in_day");
+                if (amt != el.object_value.end() && amt->second.type == JsonType::NUMBER)
+                    t.amount = amt->second.number_value;
+                if (out_it != el.object_value.end() && out_it->second.type == JsonType::NUMBER)
+                    t.out_day = static_cast<long long>(out_it->second.number_value);
+                if (in_it != el.object_value.end() && in_it->second.type == JsonType::NUMBER)
+                    t.in_day = static_cast<long long>(in_it->second.number_value);
+                out.push_back(t);
+            }
+            return out;
+        }
+
+        Totals compute(const std::vector<AccountInput>& accounts,
+                       const std::vector<InternalTransfer>& transfers,
+                       const Reconciliation::State& recon,
+                       time_t now)
+        {
+            Totals result;
+
+            // Aggregate trend baseline (live-independent).
+            std::set<std::string> account_names;
+            for (const auto& a : accounts) account_names.insert(a.name);
+
+            std::vector<HeldOutEntry> held_out;
+            for (const auto& e : recon.events)
+            {
+                if (e.status != Reconciliation::EventStatus::Transfer || e.source_account.empty())
+                    continue;
+                if (e.amount > 0.0 && account_names.count(e.source_account))
+                    held_out.push_back({ e.detected_at, e.amount });
+            }
+
+            // mergeDailySeries in app.js scales each account's series before
+            // aggregating: DEBT flips to a negative contribution, and foreign-
+            // currency CASH is converted to USD via fx_to_usd. Everything else is
+            // a USD, positive series (multiplier 1).
+            std::vector<Series> per_account;
+            per_account.reserve(accounts.size());
+            for (const auto& a : accounts)
+            {
+                Series s = accountContribSeries(a, now);
+                const double mult = (a.type == PortfolioType::DEBT ? -1.0 : 1.0) * a.fx;
+                if (mult != 1.0)
+                {
+                    for (auto& pr : s) pr.second *= mult;
+                }
+                per_account.push_back(std::move(s));
+            }
+
+            const Series aggregate = applyTransferCorrections(
+                shiftTrendSeries(mergeDailySeries(per_account), held_out), transfers);
+
+            double prev = 0.0;
+            result.has_previous = previousDistinctDayValue(aggregate, now, prev);
+            result.previous_day_total = prev;
+
+            result.held_out_total = Reconciliation::heldOutTotal(recon);
+            const long long today_floor_sec = dayBucketForTimestamp(now) * SECONDS_PER_DAY;
+            result.today_transfer_correction = transferCorrectionForDay(today_floor_sec, transfers);
+
+            double stored_total = 0.0;
+            for (const auto& a : accounts) stored_total += a.estimated_total_value;
+            result.total_assets = stored_total - result.held_out_total + result.today_transfer_correction;
+
+            if (result.has_previous)
+            {
+                result.total_day_change = result.total_assets - result.previous_day_total;
+                if (result.previous_day_total > 0.0)
+                {
+                    result.total_day_change_percent =
+                        (result.total_day_change / result.previous_day_total) * 100.0;
+                }
+            }
+            return result;
+        }
+    } // namespace dashtotals
+
     std::string buildPortfolioSummaryJson(PortfolioManager& manager)
     {
         std::ostringstream out;
@@ -2411,6 +2834,7 @@ namespace
         out << "{\"portfolios\":[";
 
         const CashHistory::State cash_history = loadCashHistory();
+        std::vector<dashtotals::AccountInput> dash_accounts;
 
         bool first = true;
         for (const auto& name : names)
@@ -2439,6 +2863,28 @@ namespace
                                        ? fetchUsdRateForCurrency(ccy_out)
                                        : 1.0;
 
+            const double estimated_total_value = estimatePortfolioTotalValue(portfolio, manager, name);
+            const std::vector<CashHistory::Point> portfolio_cash_points =
+                cash_history.count(name) ? cash_history.at(name)
+                                         : std::vector<CashHistory::Point>{};
+
+            // Collect the inputs the dashboard's total day-change needs (see
+            // dashtotals::compute below). Watchlists are excluded, matching the
+            // dashboard's accountPortfolios filter.
+            if (portfolio.getType() != PortfolioType::WATCHLIST)
+            {
+                dashtotals::AccountInput acc;
+                acc.name = name;
+                acc.type = portfolio.getType();
+                acc.available_capital = portfolio.getAvailableCapital();
+                acc.fx = fx_rate;
+                acc.estimated_total_value = estimated_total_value;
+                acc.daily_values = portfolio.getDailyValues();
+                acc.cash_points = portfolio_cash_points;
+                acc.transactions = portfolio.getTransactions();
+                dash_accounts.push_back(std::move(acc));
+            }
+
             // Cheap connection peek for the dashboard (no need to load full token).
             bool is_synced = manager.hasConnection(name);
             std::string institution_name;
@@ -2462,7 +2908,7 @@ namespace
                 << "\"fx_to_usd\":" << jsonNumber(fx_rate) << ","
                 << "\"available_capital\":" << jsonNumber(portfolio.getAvailableCapital()) << ","
                 << "\"reported_total_value\":" << jsonNumber(portfolio.getCurrentPortfolioValue()) << ","
-                << "\"estimated_total_value\":" << jsonNumber(estimatePortfolioTotalValue(portfolio, manager, name)) << ","
+                << "\"estimated_total_value\":" << jsonNumber(estimated_total_value) << ","
                 << "\"day_change_amount\":" << jsonNumber(calculatePortfolioDayChangeAmount(portfolio, manager, name)) << ","
                 << "\"day_change_percent\":" << jsonNumber(calculatePortfolioDayChangePercent(portfolio, manager, name)) << ","
                 << "\"stock_count\":" << listStocksCached(manager, name).size() << ","
@@ -2472,13 +2918,33 @@ namespace
                 << "\"needs_reauth\":" << (needs_reauth ? "true" : "false") << ","
                 << "\"reauth_detected_at\":" << static_cast<long long>(reauth_detected_at) << ","
                 << "\"daily_values\":" << serializeDailyValues(portfolio.getDailyValues()) << ","
-                << "\"cash_daily_values\":" << serializeCashHistory(
-                       cash_history.count(name) ? cash_history.at(name)
-                                                : std::vector<CashHistory::Point>{})
+                << "\"cash_daily_values\":" << serializeCashHistory(portfolio_cash_points)
                 << "}";
         }
 
-        out << "],\"internal_transfers\":" << loadInternalTransfersRaw() << "}";
+        // Dashboard-consistent total day change. `previous_day_total` is the
+        // corrected, live-INDEPENDENT prior-day baseline; the client subtracts it
+        // from its own live Total Assets sum to match the dashboard intraday.
+        // `total_day_change` here uses stored (non-live) prices for consumers that
+        // don't live-patch. `held_out_total` and `today_transfer_correction` let a
+        // live client rebuild Total Assets exactly (sum live estimated_total_value
+        // with DEBT negated, minus held_out_total, plus today_transfer_correction).
+        const std::string transfers_raw = loadInternalTransfersRaw();
+        const std::vector<dashtotals::InternalTransfer> parsed_transfers =
+            dashtotals::parseInternalTransfers(transfers_raw);
+        const Reconciliation::State recon_state = loadReconciliation();
+        const dashtotals::Totals totals =
+            dashtotals::compute(dash_accounts, parsed_transfers, recon_state, std::time(nullptr));
+
+        out << "],\"internal_transfers\":" << transfers_raw << ","
+            << "\"total_assets\":" << jsonNumber(totals.total_assets) << ","
+            << "\"previous_day_total\":"
+            << (totals.has_previous ? jsonNumber(totals.previous_day_total) : std::string("null")) << ","
+            << "\"today_transfer_correction\":" << jsonNumber(totals.today_transfer_correction) << ","
+            << "\"held_out_total\":" << jsonNumber(totals.held_out_total) << ","
+            << "\"total_day_change\":" << jsonNumber(totals.total_day_change) << ","
+            << "\"total_day_change_percent\":" << jsonNumber(totals.total_day_change_percent)
+            << "}";
         return out.str();
     }
 
