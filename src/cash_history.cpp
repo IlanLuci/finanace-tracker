@@ -44,6 +44,58 @@ namespace CashHistory
         return true;
     }
 
+    std::vector<Point> despike(const std::vector<Point>& points)
+    {
+        // A point is a transient phantom pulse only when it protrudes from BOTH
+        // neighbours in the same direction AND those neighbours form a flat
+        // baseline (they agree within a tolerance) — i.e. no real money moved,
+        // the balance left and returned to the same place. That is the
+        // settlement-fund/pending signature (e.g. Vanguard VMFXX).
+        //
+        // A real deposit-then-transfer leaves the neighbours at DIFFERENT levels
+        // (a stepped baseline): real history that reverts, which we must keep.
+        // Requiring neighbour agreement is what separates the two without needing
+        // the transaction ledger.
+        // Two independent thresholds, scaled to the local balance:
+        //  - agreement: how close the neighbours must be to count as a flat
+        //    baseline. Generous, so legitimate settlement-fund drift (VMFXX
+        //    accrual, small dividends ~tens of dollars) still reads as flat,
+        //    while a real transfer (hundreds+) reads as a step and is preserved.
+        //  - floor: the smallest pulse worth removing (ignore sub-$50 jitter).
+        const auto agreement = [](double a, double c)
+        { return std::max(150.0, 0.01 * std::max(std::fabs(a), std::fabs(c))); };
+        const auto floor = [](double a, double c)
+        { return std::max(50.0, 0.005 * std::max(std::fabs(a), std::fabs(c))); };
+
+        std::vector<Point> out = points;
+        if (points.size() < 3) return out;
+
+        // Evaluate neighbours from the ORIGINAL series so a corrected point does
+        // not cascade into its neighbour's decision.
+        for (size_t i = 1; i + 1 < points.size(); ++i)
+        {
+            const double a = points[i - 1].cash;
+            const double b = points[i].cash;
+            const double c = points[i + 1].cash;
+
+            const double dev_prev = b - a;
+            const double dev_next = b - c;
+            if (dev_prev * dev_next <= 0.0) continue;  // step/monotonic, not a pulse
+
+            const double protrusion = std::min(std::fabs(dev_prev), std::fabs(dev_next));
+            const double drift = std::fabs(a - c);  // baseline change across the pulse
+
+            // Flat baseline (neighbours agree) + a pulse above the floor. A
+            // stepped baseline (drift beyond agreement) means real money moved
+            // and stayed moved, so the reverting point is real history.
+            if (drift <= agreement(a, c) && protrusion >= floor(a, c))
+            {
+                out[i].cash = (a + c) / 2.0;  // collapse to the neighbour baseline
+            }
+        }
+        return out;
+    }
+
     // ---- Self-contained JSON persistence -----------------------------------
 
     namespace

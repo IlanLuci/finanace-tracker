@@ -1920,13 +1920,19 @@ namespace
     // chart can consume it directly. Empty array when no history exists yet.
     std::string serializeCashHistory(const std::vector<CashHistory::Point>& points)
     {
+        // Drop transient single-day anchor pulses (e.g. Vanguard VMFXX settlement
+        // timing) before they reach the chart. Non-destructive: the persisted
+        // cash_history.json is untouched; only this served view is cleaned, so
+        // the fix self-heals past spikes and reverses cleanly if removed.
+        const std::vector<CashHistory::Point> cleaned = CashHistory::despike(points);
+
         std::ostringstream out;
         out << "[";
-        for (size_t i = 0; i < points.size(); ++i)
+        for (size_t i = 0; i < cleaned.size(); ++i)
         {
             if (i > 0) out << ",";
-            out << "{\"date\":" << static_cast<long long>(points[i].day + 16 * 3600)
-                << ",\"value\":" << jsonNumber(points[i].cash) << "}";
+            out << "{\"date\":" << static_cast<long long>(cleaned[i].day + 16 * 3600)
+                << ",\"value\":" << jsonNumber(cleaned[i].cash) << "}";
         }
         out << "]";
         return out.str();

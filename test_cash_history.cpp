@@ -99,6 +99,86 @@ int main()
         check(r.empty(), "malformed -> empty state");
     }
 
+    // --- despike: remove transient single-day pulses ------------------------
+
+    auto series = [](std::vector<double> cashes)
+    {
+        std::vector<Point> pts;
+        for (size_t i = 0; i < cashes.size(); ++i)
+            pts.push_back(Point{T0 + (time_t)i * DAY, cashes[i]});
+        return pts;
+    };
+
+    // 9. The real Vanguard case: a +$556 anchor that reverts the next day is
+    //    replaced with the neighbor baseline, not left as a spike.
+    {
+        auto out = despike(series({6190.24, 6746.15, 6252.44}));
+        check(out.size() == 3, "despike keeps every day");
+        check(out[0].cash == 6190.24 && out[2].cash == 6252.44,
+              "neighbors of a pulse are untouched");
+        check(out[1].cash < 6300.0, "up-pulse collapsed toward the baseline");
+        check(approx(out[1].cash, (6190.24 + 6252.44) / 2.0),
+              "pulse replaced with neighbor midpoint");
+    }
+
+    // 10. A transient DROP (e.g. Plaid briefly reads a low balance) is also
+    //     flattened back to the baseline.
+    {
+        auto out = despike(series({600.0, 100.0, 590.0}));
+        check(approx(out[1].cash, (600.0 + 590.0) / 2.0), "down-pulse collapsed");
+    }
+
+    // 11. A genuine STEP (deposit that stays) is preserved: the next day does
+    //     not revert, so it is not a pulse.
+    {
+        auto out = despike(series({100.0, 600.0, 610.0}));
+        check(approx(out[1].cash, 600.0), "real step preserved");
+    }
+
+    // 12. Gradual monotonic drift is preserved (no interior point protrudes).
+    {
+        auto out = despike(series({100.0, 150.0, 200.0, 250.0}));
+        check(approx(out[1].cash, 150.0) && approx(out[2].cash, 200.0),
+              "gradual drift preserved");
+    }
+
+    // 13. The LAST point (today's live value) is never modified, even if it
+    //     looks like a spike relative to the prior day.
+    {
+        auto out = despike(series({100.0, 100.0, 700.0}));
+        check(approx(out[2].cash, 700.0), "last point never despiked");
+    }
+
+    // 14. The FIRST point is never modified.
+    {
+        auto out = despike(series({700.0, 100.0, 100.0}));
+        check(approx(out[0].cash, 700.0), "first point never despiked");
+    }
+
+    // 15. Series shorter than three points are returned unchanged.
+    {
+        auto out = despike(series({100.0, 700.0}));
+        check(out.size() == 2 && approx(out[1].cash, 700.0),
+              "short series untouched");
+    }
+
+    // 16. Small jitter below the dollar floor is left alone.
+    {
+        auto out = despike(series({1000.0, 1040.0, 1005.0}));
+        check(approx(out[1].cash, 1040.0), "sub-threshold jitter preserved");
+    }
+
+    // 17. A REAL one-day excursion backed by money movement — a big deposit that
+    //     is then transferred out — leaves the neighbors at DIFFERENT levels (a
+    //     stepped baseline, drift far above the floor). That is real history, not
+    //     a settlement-fund phantom, so it must be preserved even though it
+    //     reverts. (Mirrors the real USAA Checking 09-11 anchor.)
+    {
+        auto out = despike(series({1669.56, 5243.74, 2243.74}));
+        check(approx(out[1].cash, 5243.74),
+              "real round-trip with stepped baseline is preserved");
+    }
+
     std::cout << (g_failures == 0 ? "ALL PASSED" : "FAILURES: " + std::to_string(g_failures))
               << std::endl;
     return g_failures == 0 ? 0 : 1;

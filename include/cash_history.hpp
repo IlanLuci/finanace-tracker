@@ -36,6 +36,16 @@ namespace CashHistory
     // sorted by day. Returns true if the state changed.
     bool record(State& state, const std::string& account, double cash, time_t now);
 
+    // Remove transient single-day "pulses" from one account's chronological
+    // series. A day whose value protrudes from BOTH neighbors in the SAME
+    // direction — far beyond the baseline drift between those neighbors — is a
+    // settlement-fund/pending Plaid anchor glitch that reverts the next day
+    // rather than a real deposit (which is a step: the next day does not
+    // revert). Such a point is replaced with the neighbor midpoint. The first
+    // and last points are never modified (the last is today's live value).
+    // Non-destructive: the input is copied.
+    std::vector<Point> despike(const std::vector<Point>& points);
+
     // Self-contained persistence. parse() returns an empty State on malformed input.
     std::string serialize(const State& state);
     State parse(const std::string& json);
