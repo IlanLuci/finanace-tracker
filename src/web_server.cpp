@@ -2886,7 +2886,11 @@ namespace
                 acc.fx = fx_rate;
                 acc.estimated_total_value = estimated_total_value;
                 acc.daily_values = portfolio.getDailyValues();
-                acc.cash_points = portfolio_cash_points;
+                // Despike here too: the served cash chart (serializeCashHistory)
+                // drops transient single-day anchor pulses, so the day-change
+                // baseline (previous_day_total) must use the same cleaned series
+                // or the API total diverges from the graph the user sees.
+                acc.cash_points = CashHistory::despike(portfolio_cash_points);
                 acc.transactions = portfolio.getTransactions();
                 dash_accounts.push_back(std::move(acc));
             }
